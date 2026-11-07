@@ -84,6 +84,12 @@ The resulting binaries will be placed in:
 
 # Run automated tests
 ./tools/omnit_adaptive_router.py test
+
+# Run background maintenance daemon
+./tools/omnit_adaptive_router.py daemon --interval 30 --health-interval 60
+
+# Install systemd user service
+./tools/omnit_adaptive_router.py install-service
 ```
 
 ---

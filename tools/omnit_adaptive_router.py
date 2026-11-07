@@ -21,6 +21,7 @@ import re
 import socket
 import sqlite3
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -330,6 +331,16 @@ class AdaptiveDatabase:
                 )
             conn.commit()
 
+    def prune_expired_routes(self) -> int:
+        now = int(time.time())
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM adaptive_routes WHERE confidence != 'pinned' AND expires_at <= ?",
+                (now,),
+            )
+            conn.commit()
+            return cur.rowcount
+
     def clear_cache(self, keep_pinned: bool = True) -> int:
         with self.get_connection() as conn:
             if keep_pinned:
@@ -626,6 +637,85 @@ class AdaptiveRouterEngine:
 
         return result_report
 
+    async def check_node_health(self, node: Dict[str, Any]) -> Tuple[bool, int]:
+        """Check if a node in node_pool is alive and measure its roundtrip latency."""
+        socks_port = node.get("socks_port")
+        if not socks_port:
+            return False, 0
+        ok, latency_ms, _ = await self.probe_socks_node(socks_port, "cp.cloudflare.com", timeout=3.0)
+        self.db.update_node_status(node["outbound_tag"], ok, latency_ms)
+        return ok, latency_ms
+
+    async def check_all_nodes(self) -> Dict[str, Any]:
+        """Check health of all nodes in the pool."""
+        nodes = self.db.list_nodes()
+        results = {}
+        for n in nodes:
+            ok, lat = await self.check_node_health(n)
+            results[n["outbound_tag"]] = {"alive": ok, "latency_ms": lat}
+        return results
+
+    async def run_daemon(self, interval: float = 30.0, health_interval: float = 60.0) -> None:
+        """Run ongoing background maintenance: pruning expired routes and checking node health."""
+        print(f"[OMNIT-ROUTER] Daemon started. Prune interval={interval}s, Node health interval={health_interval}s")
+        last_health_check = 0.0
+        while True:
+            now = time.time()
+            try:
+                # 1. Prune expired cache
+                pruned = self.db.prune_expired_routes()
+                if pruned > 0:
+                    print(f"[OMNIT-ROUTER] Pruned {pruned} expired routes. Resynchronizing rule sets...")
+                    self.synchronizer.sync()
+
+                # 2. Check node health
+                if now - last_health_check >= health_interval:
+                    last_health_check = now
+                    health_res = await self.check_all_nodes()
+                    alive_count = sum(1 for v in health_res.values() if v["alive"])
+                    print(f"[OMNIT-ROUTER] Health check: {alive_count}/{len(health_res)} nodes alive")
+            except Exception as e:
+                print(f"[OMNIT-ROUTER] Daemon error: {e}", file=sys.stderr)
+
+            await asyncio.sleep(interval)
+
+
+def install_systemd_service(python_exec: Optional[str] = None) -> Path:
+    """Install and enable systemd user unit for omnit-adaptive-router."""
+    user_unit_dir = Path.home() / ".config" / "systemd" / "user"
+    user_unit_dir.mkdir(parents=True, exist_ok=True)
+    unit_file = user_unit_dir / "omnit-adaptive-router.service"
+    py = python_exec or sys.executable
+    script_path = Path(__file__).resolve()
+
+    content = f"""[Unit]
+Description=OMNIT Adaptive Router & Multi-Egress Engine Daemon
+After=network-online.target graphical-session.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={py} {script_path} daemon --interval 30 --health-interval 60
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+UMask=0077
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
+"""
+    with tempfile.NamedTemporaryFile("w", dir=user_unit_dir, prefix=".omnit-adaptive-router.service.", delete=False) as tf:
+        tf.write(content)
+        temp_name = Path(tf.name)
+    temp_name.chmod(0o600)
+    os.replace(temp_name, unit_file)
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+    subprocess.run(["systemctl", "--user", "enable", "--now", "omnit-adaptive-router.service"], check=False)
+    print(f"Installed and started {unit_file}")
+    return unit_file
+
 
 def run_tests() -> int:
     """Automated verification suite testing all 6 levels, SQLite persistence, and atomic writes."""
@@ -721,6 +811,15 @@ def main() -> None:
     # clear-cache
     subparsers.add_parser("clear-cache", help="Clear non-pinned adaptive routes")
 
+    # daemon
+    p_daemon = subparsers.add_parser("daemon", help="Run maintenance daemon")
+    p_daemon.add_argument("--interval", type=float, default=30.0, help="Prune interval in seconds")
+    p_daemon.add_argument("--health-interval", type=float, default=60.0, help="Health check interval in seconds")
+
+    # install-service
+    p_install = subparsers.add_parser("install-service", help="Install systemd user service")
+    p_install.add_argument("--python", help="Path to python executable")
+
     args = parser.parse_args()
 
     if args.command == "test":
@@ -771,6 +870,16 @@ def main() -> None:
         cleared = engine.db.clear_cache()
         engine.synchronizer.sync()
         print(f"Cleared {cleared} cached routes and resynced rules.")
+
+    elif args.command == "daemon":
+        try:
+            asyncio.run(engine.run_daemon(interval=args.interval, health_interval=args.health_interval))
+        except KeyboardInterrupt:
+            print("[OMNIT-ROUTER] Daemon stopped by user.")
+
+    elif args.command == "install-service":
+        unit = install_systemd_service(python_exec=args.python)
+        print(f"OMNIT Adaptive Router daemon service installed: {unit}")
 
     else:
         parser.print_help()
