@@ -85,6 +85,15 @@ namespace Configs {
 
         static std::shared_ptr<RouteProfile> GetDefaultChain();
 
+        // Opinionated split-tunnel preset for the OMNIT desktop: ordinary traffic
+        // stays direct, while blocked and explicitly selected services use proxy.
+        static std::shared_ptr<RouteProfile> GetOmnitWhitelist();
+
+        // Managed full-tunnel preset: all unmatched traffic uses the selected
+        // proxy. Only the transport processes that create that proxy connection
+        // are sent directly, otherwise the VPN would route back into itself.
+        static std::shared_ptr<RouteProfile> GetOmnitFullTunnel();
+
         std::shared_ptr<QList<int>> get_used_outbounds();
 
         std::shared_ptr<QStringList> get_used_rule_sets();

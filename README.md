@@ -1,89 +1,93 @@
-# Throne (Formerly Nekoray)
+# OMNIT VPN
 
-Qt based Desktop cross-platform GUI proxy utility, empowered by [Sing-box](https://github.com/SagerNet/sing-box)
+> Open-source Linux VPN client with adaptive routing, multi-region egress, and intelligent traffic management.
 
-Supports Windows 11/10/8/7 / Linux / MacOS out of the box.
+[![Platform](https://img.shields.io/badge/platform-Linux-blue.svg)](https://github.com/rixed318/omnit-vpn)
+[![Core](https://img.shields.io/badge/core-sing--box%20%2B%20Xray-orange.svg)](https://github.com/rixed318/omnit-vpn)
+[![License](https://img.shields.io/badge/license-GPLv3-green.svg)](LICENSE)
 
-<img width="1002" height="789" alt="image" src="https://github.com/user-attachments/assets/af4a8e32-7e55-430c-9402-ec2d665cf71a" />
+OMNIT VPN is designed for Linux workstations requiring seamless access to both domestic Russian services and international applications simultaneously. Instead of forcing all internet traffic through a single foreign VPN or requiring manual whitelist management, OMNIT autonomously routes each service through its optimal connection.
 
-### Note on MacOS releases
-Apple platforms have a very strict security policy and since Throne does not have a signed certificate, you will have to remove the quarantine using `xattr -d com.apple.quarantine /path/to/throne.app`. Move `Throne.app` to `/Applications` before the first launch — the built-in privilege escalation opens `Terminal` to make the core setuid-root, and that step can fail while the app is still inside `~/Downloads`.
+---
 
-### GitHub Releases (Portable ZIP)
+## Key Features
 
-[![GitHub All Releases](https://img.shields.io/github/downloads/throneproj/Throne/total?label=downloads-total&logo=github&style=flat-square)](https://github.com/throneproj/Throne/releases)
+- **Multi-Egress Architecture**: Concurrently routes traffic to different countries (e.g. Netherlands, Germany, United States, and Direct Russian internet) in the same TUN interface.
+- **Adaptive Routing 2.0**: Automatically detects connection failures and learns the optimal exit node for each service, storing decisions in a local SQLite cache.
+- **Zero-Downtime Hot Rule Updates**: Dynamically migrates domain routes via atomic rule-sets without tearing down `throne-tun` or resetting ongoing connections.
+- **6-Level Priority Resolver**:
+  1. System Bypass (LAN, loopback, private RFC1918 networks).
+  2. User Pinned Rules (highest priority manual controls).
+  3. Protected Russian Services (Gosuslugi, banks, tax portals stay strictly Direct).
+  4. Adaptive Route Cache (TTL-validated historical success routes).
+  5. Regional Hints (`*.ru`, `*.рф` default to Direct, adaptable on failure).
+  6. Default Outbound (foreign SaaS, AI tools, CDN to primary VPN pool).
+- **Safe Active Probing**: Built-in anti-spam limits (max 30 probes/hour, max 2 candidate countries per incident, exponential backoff) with zero session credential leakage.
+- **Owner-Local Control Protocol**: Single-instance desktop IPC via secure UNIX domain socket (`OMNIT-CONTROL/1`).
 
-# Linux CLI installer
-```bash
-curl -fsSL https://raw.githubusercontent.com/throneproj/Throne/dev/script/install_linux.py | sudo python3
+---
+
+## Architecture Overview
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for full design specifications and protocol flows.
+
+```text
+applications & desktop traffic
+              |
+              v
+     OMNIT sing-box TUN
+              |-- Unmatched & Russian sensitive ---> DIRECT (Physical enp4s0 / Wi-Fi)
+              |-- Adaptive cached services ---------> Multi-Egress Pool (NL / DE / US)
+              `-- Pinned overrides -----------------> Target Outbound
 ```
 
-### RPM repository
-[Throne RPM repository](https://parhelia512.github.io/) for Fedora/RHEL and openSUSE/SLE.
+---
 
-## Supported protocols
+## Building from Source
 
-- SOCKS
-- HTTP(S)
-- Shadowsocks
-- Trojan
-- VMess
-- VLESS
-- TUIC
-- Hysteria
-- Hysteria2
-- AnyTLS
-- Mieru
-- NaïveProxy
-- Juicity
-- TrustTunnel
-- ShadowTLS
-- Wireguard
-- AmneziaWG
-- SSH
-- Xray VLESS
-- Custom Outbound (Both Sing-box and Xray)
-- Custom Config (Both Sing-box and Xray)
-- Chaining outbounds
-- Extra Core
+### Prerequisites (Ubuntu / Debian / Kubuntu)
 
-## Subscription Formats
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+    build-essential cmake ninja-build git \
+    qt6-base-dev qt6-tools-dev libqt6core6 libqt6gui6 libqt6widgets6 \
+    libqt6network6 libqt6dbus6 libprotobuf-dev protobuf-compiler
+```
 
-Various formats are supported, including share links, various JSON representation of Sing-box configs, and v2rayN link format as well as limited support for Shadowsocks and Clash formats.
+### Build Commands
 
-Deeplinks are also supported, read the [documentation](https://throneproj.github.io/advanced/deeplinks/) for more information.
+```bash
+mkdir -p build && cd build
+cmake -GNinja -DCMAKE_BUILD_TYPE=Release ..
+ninja
+```
 
-## Credits
+The resulting binaries will be placed in:
+- `build/Throne` — Qt 6 GUI Desktop Client.
+- `build/ThroneCore` — Unified sing-box + Xray-core backend.
 
-- [SagerNet/sing-box](https://github.com/SagerNet/sing-box)
-- [XTLS/Xray-core](https://github.com/xtls/xray-core)
-- [Qv2ray](https://github.com/Qv2ray/Qv2ray)
-- [Qt](https://www.qt.io/)
-- [simple-protobuf](https://github.com/tonda-kriz/simple-protobuf)
-- [fkYAML](https://github.com/fktn-k/fkYAML)
-- [quirc](https://github.com/dlbeer/quirc)
-- [QHotkey](https://github.com/Skycoder42/QHotkey)
-- [srombauts/sqlitecpp](https://github.com/srombauts/sqlitecpp)
+---
 
-## FAQ
-**How does this project differ from the original Nekoray?** <br/>
-Nekoray's developer partially abandoned the project on December of 2023, some minor updates were done recently but the project is now officially archived. This project was meant to continue the way of the original project, with lots of improvements, tons of new features and also, removal of obsolete features and simplifications.
+## Running Adaptive Router CLI
 
-**Why does my Anti-Virus detect Throne and/or its Core as malware?** <br/>
-Throne's built-in update functionallity downloads the new release, removes the old files and replaces them with the new ones, which is quite simliar to what malwares do, remove your files and replace them with an encrypted version of your files.
-Also the `System DNS` feature will change your system's DNS settings, which is also considered a dangerous action by some Anti-Virus applications.
+```bash
+# Verify routing decision for a domain
+./tools/omnit_adaptive_router.py resolve gosuslugi.ru
+./tools/omnit_adaptive_router.py resolve whop.com
 
-**Is setting the `SUID` bit really needed on Linux?** <br/>
-To create and manage a system TUN interface, root access is required, without it, you will have to grant the Core some `Cap_xxx_admin` and still, need to enter your password 3 to 4 times per TUN activation. You can also opt to disable the automatic privilege escalation in `Basic Settings`->`Security`, but note that features that require root access will stop working unless you manually grant the needed permissions.
+# Pin a domain to Germany
+./tools/omnit_adaptive_router.py pin whop.com DE
 
-**Why does my internet stop working after I force quit Throne?** <br/>
-If Throne is force-quit while `System proxy` is enabled, the process ends immediately and Throne cannot reset the proxy. <br/>
-Solution:
-- Always close Throne normally.
-- If you force quit by accident, open Throne again, enable `System proxy`, then disable it- this will reset the settings.
+# View router status and node pool
+./tools/omnit_adaptive_router.py status
 
-**Where are the downloadable route profiles/rulesets coming from?**<br/>
-They are located at the [routeprofiles](https://github.com/throneproj/routeprofiles) repository.
+# Run automated tests
+./tools/omnit_adaptive_router.py test
+```
 
-**How does "Throne-\<version\>-debian-system-qt-x64.deb" differ from "Throne-\<version\>-debian-x64.deb" and why is the latter 3 times heavier then the former?**<br/>
-The first one does not pack the Qt libraries and relies on those installed on the host. The second one packs everything needed with itself, thus being heavier. The reason the first one exists is that on legacy systems provided Qt libraries use unsupported system features. If a graphical interface fails to load for your system, you may try to download the system-qt version and install fitting Qt libraries from your package manager or compile them from source.
+---
+
+## License
+
+GPLv3. See [LICENSE](LICENSE) for details.

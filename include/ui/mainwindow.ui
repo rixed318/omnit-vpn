@@ -17,7 +17,7 @@
    </size>
   </property>
   <property name="windowTitle">
-   <string notr="true">Throne</string>
+   <string notr="true">OMNIT</string>
   </property>
   <widget class="QWidget" name="centralwidget">
    <layout class="QVBoxLayout" name="verticalLayout_3" stretch="0,1,0">
@@ -199,7 +199,7 @@ QToolButton::menu-indicator {
 }</string>
         </property>
         <property name="text">
-         <string>Routing</string>
+         <string>Маршруты</string>
         </property>
         <property name="icon">
          <iconset resource="../../res/Throne.qrc">

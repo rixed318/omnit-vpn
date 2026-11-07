@@ -75,6 +75,19 @@ static const QMap<QString, QPalette> &customThemePalettes() {
     static const QMap<QString, QPalette> palettes = [] {
         QMap<QString, QPalette> m;
 
+        // OMNIT's clean white/purple desktop shell.
+        m["omnit"] = buildThemePalette({
+            .window = "#F7F8FC", .windowText = "#25243A",
+            .base = "#FFFFFF", .alternateBase = "#FAFAFD",
+            .text = "#25243A",
+            .button = "#FFFFFF", .buttonText = "#25243A",
+            .brightText = "#FFFFFF",
+            .highlight = "#E8E3FF", .highlightedText = "#30277A",
+            .link = "#6F5CF6",
+            .tooltipBase = "#FFFFFF", .tooltipText = "#25243A",
+            .placeholder = "#9292A3", .disabledText = "#A9A9B5",
+        });
+
         // Light gray, near-monochrome.
         m["flatgray"] = buildThemePalette({
             .window = "#FFFFFF", .windowText = "#57595B",
@@ -167,6 +180,8 @@ void ThemeManager::ApplyTheme(const QString &theme, bool force) {
         qApp->setPalette(palettes.value(lowerTheme));
         if (lowerTheme == "qdarkstyle") {
             qApp->setStyleSheet(ReadFileText(":/qdarkstyle/dark/darkstyle.qss"));
+        } else if (lowerTheme == "omnit") {
+            qApp->setStyleSheet(ReadFileText(":/qss/omnit.css"));
         } else {
             qApp->setStyleSheet(ReadFileText(":/qss/" + lowerTheme + ".css"));
         }

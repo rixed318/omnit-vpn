@@ -8,6 +8,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QMessageBox>
+#include <QScopedValueRollback>
 
 #include "3rdparty/qv2ray/v2/proxy/QvProxyConfigurator.hpp"
 #include "include/global/HTTPRequestHelper.hpp"
@@ -19,6 +20,7 @@
 #include "include/ui/setting/dialog_basic_settings.h"
 #include "include/ui/setting/dialog_hotkey.h"
 #include "include/ui/setting/dialog_manage_routes.h"
+#include "include/ui/setting/dialog_omnit_services.h"
 #include "include/ui/setting/dialog_vpn_settings.h"
 
 #ifdef Q_OS_WIN
@@ -56,6 +58,21 @@ void MainWindow::on_menu_routing_settings_triggered() {
     dialog_is_using = true;
     auto dialog = new DialogManageRoutes(this);
     connect(dialog, &QDialog::finished, this, [=,this] {
+        dialog->deleteLater();
+        dialog_is_using = false;
+    });
+    dialog->show();
+}
+
+void MainWindow::on_menu_omnit_services_triggered() {
+    if (dialog_is_using) return;
+    dialog_is_using = true;
+    auto* dialog = new DialogOmnitServices(this);
+    connect(dialog, &DialogOmnitServices::routingApplied, this, [this] {
+        const int runningId = Configs::dataManager->settingsRepo->started_id;
+        if (runningId >= 0) profile_start(runningId);
+    });
+    connect(dialog, &QDialog::finished, this, [this, dialog] {
         dialog->deleteLater();
         dialog_is_using = false;
     });
@@ -193,6 +210,11 @@ bool MainWindow::get_elevated_permissions(ExitReason reason) {
         return true;
     }
     if (Configs::IsAdmin()) return true;
+    m_privilegeRequired = true;
+    if (m_suppressConnectionPrompts || m_privilegeRequestInProgress) return false;
+    // QMessageBox runs a nested event loop. Ignore repeated requests until both
+    // the dialog and any resulting elevation command have finished.
+    QScopedValueRollback<bool> privilegeRequest(m_privilegeRequestInProgress, true);
 #ifdef Q_OS_LINUX
     if (!Linux_HavePkexec()) {
         MessageBoxWarning(software_name, "Please install \"pkexec\" first.");
@@ -200,20 +222,25 @@ bool MainWindow::get_elevated_permissions(ExitReason reason) {
     }
     auto n = QMessageBox::warning(GetMessageBoxParent(), software_name, tr("Please give the core root privileges"), QMessageBox::Yes | QMessageBox::No);
     if (n == QMessageBox::Yes) {
-        runOnNewThread([=,this]
+        privilegeRequest.commit();
+        const QPointer<MainWindow> window(this);
+        const QString corePath = Configs::FindCoreRealPath();
+        runOnNewThread([window, corePath]
         {
-            auto chownArgs = QString("root:root " + Configs::FindCoreRealPath());
+            auto chownArgs = QString("root:root " + corePath);
             auto ret = Linux_Run_Command("chown", chownArgs);
             if (ret != 0) {
                 MW_show_log(QString("Failed to run chown %1 code is %2").arg(chownArgs).arg(ret));
-            }
-            auto chmodArgs = QString("u+s " + Configs::FindCoreRealPath());
-            ret = Linux_Run_Command("chmod", chmodArgs);
-            if (ret == 0) {
-                StopVPNProcess();
             } else {
-                MW_show_log(QString("Failed to run chmod %1").arg(chmodArgs));
+                auto chmodArgs = QString("u+s " + corePath);
+                ret = Linux_Run_Command("chmod", chmodArgs);
+                if (ret != 0) MW_show_log(QString("Failed to run chmod %1").arg(chmodArgs));
             }
+            runOnUiThread([window, ret] {
+                if (!window) return;
+                window->m_privilegeRequestInProgress = false;
+                if (ret == 0) window->StopVPNProcess();
+            });
         });
         return false;
     }
@@ -292,6 +319,15 @@ void MainWindow::set_spmode_vpn(bool enable, bool save) {
                 return;
             }
         }
+
+        // OMNIT uses the TUN as the single system-wide entry point. HAPP's Proxy
+        // mode may leave KDE pointing every application at 127.0.0.1:10809;
+        // keeping that manual proxy enabled would bypass our whitelist and would
+        // also strand applications whenever HAPP restarts. Clear any system proxy
+        // before the TUN takes ownership of routing.
+        set_system_proxy(false);
+        Configs::dataManager->settingsRepo->spmode_system_proxy = false;
+        ui->checkBox_SystemProxy->setChecked(false);
     }
 
     if (save) {

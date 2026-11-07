@@ -8,6 +8,7 @@
 #include <QUrl>
 #include <QTranslator>
 #include <QMessageBox>
+#include <QPointer>
 #include <QStandardPaths>
 #include <QLocalSocket>
 #include <QLocalServer>
@@ -117,6 +118,7 @@ int main(int argc, char* argv[]) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication::setQuitOnLastWindowClosed(false);
     QApplication a(argc, argv);
+    QApplication::setApplicationDisplayName("OMNIT");
 
 #ifdef Q_OS_MACOS
     // Install before the event loop so launch-by-deeplink FileOpen events are caught.
@@ -297,20 +299,36 @@ int main(int argc, char* argv[]) {
 
     // QLocalServer
     QLocalServer server(qApp);
-    server.setSocketOptions(QLocalServer::WorldAccessOption);
+    // The socket now also carries the OMNIT owner-control protocol. Keep it
+    // private to the desktop owner instead of allowing every local account to
+    // start/stop the VPN or query its state.
+    server.setSocketOptions(QLocalServer::UserAccessOption);
     if (!server.listen(serverName)) {
         qWarning() << "Failed to start QLocalServer! Error:" << server.errorString();
         Logging::Shutdown();
         return 1;
     }
     QObject::connect(&server, &QLocalServer::newConnection, qApp, [&] {
-        auto s = server.nextPendingConnection();
+        QPointer<QLocalSocket> s = server.nextPendingConnection();
         qDebug() << "Another instance tried to wake us up on " << serverName << s;
         // The waking instance may forward deeplinks and opened files as payload, one
         // url per line. Only whole lines are handled as they arrive; the tail, which
         // carries no trailing newline, is flushed once the peer is done.
         auto pending = std::make_shared<QByteArray>();
-        auto handleLine = [](const QString &line) {
+        auto controlRequest = std::make_shared<bool>(false);
+        auto handleLine = [s, controlRequest](const QString &line) {
+            static const QString controlPrefix = QStringLiteral("OMNIT-CONTROL/1 ");
+            if (line.startsWith(controlPrefix)) {
+                *controlRequest = true;
+                const QByteArray request = line.mid(controlPrefix.size()).toUtf8();
+                const QByteArray response = GetMainWindow()->handleOmnitControlRequest(request);
+                // A nested UI event loop can process disconnect/deleteLater
+                // while handling a request. Do not use a departed peer.
+                if (!s || s->state() != QLocalSocket::ConnectedState) return;
+                s->write("OMNIT-CONTROL/1 " + response + "\n");
+                s->flush();
+                return;
+            }
             if (line.startsWith("throne://")) {
                 Deeplink_Submit(line);
             } else if (line.startsWith("file://")) {
@@ -318,24 +336,29 @@ int main(int argc, char* argv[]) {
             }
         };
         auto readPayload = [s, pending, handleLine](bool last) {
+            if (!s) return;
             pending->append(s->readAll());
             while (true) {
                 const auto at = pending->indexOf('\n');
                 if (at < 0) break;
-                handleLine(QString::fromUtf8(pending->first(at)).trimmed());
+                const QString line = QString::fromUtf8(pending->first(at)).trimmed();
+                // Consume before dispatch: disconnected can re-enter readPayload.
                 pending->remove(0, at + 1);
+                handleLine(line);
             }
             if (last) {
-                handleLine(QString::fromUtf8(*pending).trimmed());
+                const QString line = QString::fromUtf8(*pending).trimmed();
                 pending->clear();
+                if (!line.isEmpty()) handleLine(line);
             }
         };
         QObject::connect(s, &QLocalSocket::readyRead, s, [readPayload] { readPayload(false); });
-        QObject::connect(s, &QLocalSocket::disconnected, s, [readPayload] { readPayload(true); });
+        QObject::connect(s, &QLocalSocket::disconnected, s, [readPayload, controlRequest] {
+            readPayload(true);
+            if (!*controlRequest) MW_dialog_message(MwMessage::Raise, {});
+        });
         QObject::connect(s, &QLocalSocket::disconnected, s, &QLocalSocket::deleteLater);
         readPayload(false); // in case the payload already arrived
-        // raise main window
-        MW_dialog_message(MwMessage::Raise, {});
     });
     QObject::connect(qApp, &QApplication::aboutToQuit, [&]
     {

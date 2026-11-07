@@ -88,6 +88,7 @@ namespace Configs {
         // TLS tricks (mixed-case SNI): default for profiles left on "Keep Default".
         bool tls_tricks_default_on = false;
         QString theme = "0";
+        bool omnit_theme_migrated = false;
         int language = 0;
         QString font = "";
         int font_size = 0;

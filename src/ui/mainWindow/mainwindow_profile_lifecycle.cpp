@@ -14,6 +14,7 @@
 #include <QJsonDocument>
 #include <QFile>
 #include <QRegularExpression>
+#include <QScopedValueRollback>
 
 #include "include/configs/generate.h"
 #include "include/configs/common/xrayStreamSetting.h"
@@ -172,8 +173,17 @@ bool MainWindow::handleXrayGeoAssetError(const QString& error, const QString& co
     return true;
 }
 
-void MainWindow::profile_start(int _id) {
+void MainWindow::profile_start(int _id, bool background) {
     if (Configs::dataManager->settingsRepo->prepare_exit) return;
+    background = background || m_suppressConnectionPrompts;
+    QScopedValueRollback<bool> suppressPrompts(m_suppressConnectionPrompts, background);
+    m_lastConnectionError.clear();
+    const auto rejectStart = [this, background](const QString &code, const QString &title, const QString &message) {
+        m_lastConnectionError = code;
+        MW_show_log(title + ": " + message);
+        if (background) m_controlConnectionError = code;
+        else MessageBoxWarning(title, message);
+    };
 #ifdef Q_OS_LINUX
     if (Configs::dataManager->settingsRepo->enable_dns_server && Configs::dataManager->settingsRepo->dns_server_listen_port <= 1024) {
         if (!get_elevated_permissions()) {
@@ -217,7 +227,7 @@ void MainWindow::profile_start(int _id) {
                 rank_auto_selector(ent);
                 runOnUiThread([=, this] {
                     auto_selector_ranked = false;
-                    profile_start(startId);
+                    profile_start(startId, background);
                 });
             });
             return;
@@ -227,7 +237,7 @@ void MainWindow::profile_start(int _id) {
 
     const auto result = Configs::BuildSingBoxConfig(ent);
     if (!result->error.isEmpty()) {
-        MessageBoxWarning(tr("BuildConfig return error"), result->error);
+        rejectStart(QStringLiteral("invalid_profile_config"), tr("BuildConfig return error"), result->error);
         return;
     }
 
@@ -261,9 +271,17 @@ void MainWindow::profile_start(int _id) {
         bool rpcOK;
         const QString error = defaultClient->Start(&rpcOK, req);
         if (!rpcOK) {
+            runOnUiThread([this] { m_lastConnectionError = QStringLiteral("core_unavailable"); });
             return false;
         }
         if (!error.isEmpty()) {
+            // Preserve the request's mode across the worker boundary. By now
+            // the socket handler's scoped flag has already been restored.
+            runOnUiThread([this] { m_lastConnectionError = QStringLiteral("core_start_failed"); });
+            if (background) {
+                MW_show_log("LoadConfig return error: " + error);
+                return false;
+            }
             // Fail now and let handleXrayGeoAssetError prompt asynchronously; blocking to
             // download would trip the "no response" restart prompt. Starting again picks them up.
             if (handleXrayGeoAssetError(error, ent->outbound->DisplayTypeAndName())) {
@@ -333,8 +351,10 @@ void MainWindow::profile_start(int _id) {
         Configs::dataManager->settingsRepo->UpdateStartedId(ent->id);
         running = ent;
         if (Configs::dataManager->settingsRepo->spmode_system_proxy) set_system_proxy(true);
+        else if (Configs::dataManager->settingsRepo->spmode_vpn) set_system_proxy(false);
 
         runOnUiThread([=, this] {
+            m_lastConnectionError.clear();
             refresh_status();
             refresh_proxy_list({ent->id});
             // Reveals the Tools entry and seeds the data-view panel before the
@@ -359,11 +379,11 @@ void MainWindow::profile_start(int _id) {
     };
 
     if (!mu_starting.tryLock()) {
-        MessageBoxWarning(software_name, tr("Another profile is starting..."));
+        rejectStart(QStringLiteral("profile_start_in_progress"), software_name, tr("Another profile is starting..."));
         return;
     }
     if (!mu_stopping.tryLock()) {
-        MessageBoxWarning(software_name, tr("Another profile is stopping..."));
+        rejectStart(QStringLiteral("profile_stop_in_progress"), software_name, tr("Another profile is stopping..."));
         mu_starting.unlock();
         return;
     }
@@ -383,10 +403,14 @@ void MainWindow::profile_start(int _id) {
     }
 
     // timeout message
-    const auto restartMsgbox = new QMessageBox(QMessageBox::Question, software_name, tr("If there is no response for a long time, it is recommended to restart the software."),
-                                         QMessageBox::Yes | QMessageBox::No, this);
-    connect(restartMsgbox, &QMessageBox::accepted, this, [=,this] { MW_dialog_message(MwMessage::RestartProgram, {}); });
-    const auto restartMsgboxTimer = new MessageBoxTimer(this, restartMsgbox, 10000);
+    QMessageBox *restartMsgbox = nullptr;
+    MessageBoxTimer *restartMsgboxTimer = nullptr;
+    if (!background) {
+        restartMsgbox = new QMessageBox(QMessageBox::Question, software_name, tr("If there is no response for a long time, it is recommended to restart the software."),
+                                       QMessageBox::Yes | QMessageBox::No, this);
+        connect(restartMsgbox, &QMessageBox::accepted, this, [=,this] { MW_dialog_message(MwMessage::RestartProgram, {}); });
+        restartMsgboxTimer = new MessageBoxTimer(this, restartMsgbox, 10000);
+    }
 
     // Show the "Connecting" state until the start resolves below.
     runOnUiThread([this] {
@@ -397,7 +421,7 @@ void MainWindow::profile_start(int _id) {
     runOnNewThread([=, this] {
         // stop current running
         if (running != nullptr) {
-            profile_stop(false, false, true);
+            profile_stop(false, false, true, background);
             mu_stopping.lock();
             mu_stopping.unlock();
         }
@@ -409,9 +433,11 @@ void MainWindow::profile_start(int _id) {
         mu_starting.unlock();
         // cancel timeout
         runOnUiThread([=, this] {
-            restartMsgboxTimer->cancel();
-            restartMsgboxTimer->deleteLater();
-            restartMsgbox->deleteLater();
+            if (restartMsgboxTimer) {
+                restartMsgboxTimer->cancel();
+                restartMsgboxTimer->deleteLater();
+            }
+            if (restartMsgbox) restartMsgbox->deleteLater();
             // Start has resolved (success or failure); leave the Connecting state.
             m_profileConnecting = false;
             refresh_startstop_button();
@@ -419,11 +445,12 @@ void MainWindow::profile_start(int _id) {
     });
 }
 
-void MainWindow::profile_stop(bool crash, bool block, bool manual) {
+void MainWindow::profile_stop(bool crash, bool block, bool manual, bool background) {
     if (running == nullptr) {
         return;
     }
     const auto id = running->id;
+    background = background || (QThread::currentThread() == thread() && m_suppressConnectionPrompts);
 
     auto profile_stop_stage2 = [=,this] {
         if (testRunner->isTestingCurrent()) {
@@ -435,7 +462,11 @@ void MainWindow::profile_stop(bool crash, bool block, bool manual) {
             bool rpcOK;
             const QString error = defaultClient->Stop(&rpcOK);
             if (rpcOK && !error.isEmpty()) {
-                runOnUiThread([=,this] { MessageBoxWarning(tr("Stop return error"), error); });
+                runOnUiThread([=,this] {
+                    m_lastConnectionError = QStringLiteral("core_stop_failed");
+                    if (background) MW_show_log(tr("Stop return error") + ": " + error);
+                    else MessageBoxWarning(tr("Stop return error"), error);
+                });
                 return false;
             } else if (!rpcOK) {
                 return false;
@@ -476,6 +507,7 @@ void MainWindow::profile_stop(bool crash, bool block, bool manual) {
         QMessageBox* restartMsgbox = nullptr;
         MessageBoxTimer* restartMsgboxTimer = nullptr;
         runOnUiThread([=, this, &restartMsgbox, &restartMsgboxTimer] {
+            if (background) return;
             restartMsgbox = new QMessageBox(QMessageBox::Question, software_name, tr("If there is no response for a long time, it is recommended to restart the software."),
                              QMessageBox::Yes | QMessageBox::No, this);
             connect(restartMsgbox, &QMessageBox::accepted, this, [=, this] { MW_dialog_message(MwMessage::RestartProgram, {}); });

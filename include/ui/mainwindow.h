@@ -91,6 +91,12 @@ public:
     qint64 GetCorePid();
     QString GetRunningConfigName();
 
+    // Owner-local control protocol used by the OMNIT desktop shell. Requests
+    // arrive through the existing single-instance QLocalServer and return a
+    // compact JSON snapshot; no subscription URL, credentials or raw config is
+    // exposed by this boundary.
+    QByteArray handleOmnitControlRequest(const QByteArray &request);
+
     void prepare_exit();
 
     void refresh_proxy_list(const QList<int> &ids = {}, bool mayNeedReset = false,
@@ -104,9 +110,9 @@ public:
 
     void update_traffic_graph(int proxyDl, int proxyUp, int directDl, int directUp);
 
-    void profile_start(int _id = -1);
+    void profile_start(int _id = -1, bool background = false);
 
-    void profile_stop(bool crash = false, bool block = false, bool manual = false);
+    void profile_stop(bool crash = false, bool block = false, bool manual = false, bool background = false);
 
     int get_profile_to_start();
 
@@ -158,6 +164,8 @@ private slots:
     void on_menu_basic_settings_triggered();
 
     void on_menu_routing_settings_triggered();
+
+    void on_menu_omnit_services_triggered();
 
     void on_menu_vpn_settings_triggered();
 
@@ -236,6 +244,12 @@ private:
     QMutex coreProcessMutex; // serializes core_process init (DS_cores) vs IPC newConnection (UI)
     QLocalServer *core_server = nullptr;
     bool rpc_started = false;
+    // Background connection operations must never wait for a UI dialog.
+    bool m_suppressConnectionPrompts = false;
+    QString m_controlConnectionError;
+    QString m_lastConnectionError;
+    bool m_privilegeRequired = false;
+    bool m_privilegeRequestInProgress = false;
     qint64 vpn_pid = 0;
     //
     QTextDocument *qvLogDocument = new QTextDocument(this);
@@ -254,6 +268,10 @@ private:
     // once, and we only want one prompt/download. Touched on the UI thread only.
     bool m_xrayGeoAssetBusy = false;
     QString traffic_update_cache;
+    int m_proxyDownloadRate = 0;
+    int m_proxyUploadRate = 0;
+    int m_directDownloadRate = 0;
+    int m_directUploadRate = 0;
     qint64 last_test_time = 0;
     //
     int proxy_last_order = -1;

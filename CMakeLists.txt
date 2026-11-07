@@ -133,6 +133,8 @@ set(PROJECT_SOURCES
         include/configs/sub/RouteUpdater.hpp
         src/configs/sub/RouteUpdater.cpp
         src/configs/sub/clash.cpp
+        include/configs/OmnitServiceRouting.hpp
+        src/configs/OmnitServiceRouting.cpp
 
         include/sys/Process.hpp
         src/sys/Process.cpp
@@ -263,6 +265,9 @@ set(PROJECT_SOURCES
         src/ui/setting/dialog_manage_routes.cpp
         include/ui/setting/dialog_manage_routes.h
         include/ui/setting/dialog_manage_routes.ui
+
+        src/ui/setting/dialog_omnit_services.cpp
+        include/ui/setting/dialog_omnit_services.h
 
         src/ui/setting/dialog_vpn_settings.cpp
         include/ui/setting/dialog_vpn_settings.h

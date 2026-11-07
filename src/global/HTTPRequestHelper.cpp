@@ -4,6 +4,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QTcpSocket>
 #include <QTimer>
 #include <QFile>
 #include <QApplication>
@@ -18,12 +19,45 @@
 
 namespace Configs_network {
 
-    HTTPResponse NetworkRequestHelper::HttpGet(const QString &url, bool sendHwid, bool useProxy) {
+    namespace {
+        constexpr auto HAPP_BRIDGE_HOST = "127.0.0.1";
+        constexpr quint16 HAPP_BRIDGE_HTTP_PORT = 10809;
+
+        bool IsHappBridgeAvailable() {
+            QTcpSocket socket;
+            socket.connectToHost(QString::fromLatin1(HAPP_BRIDGE_HOST), HAPP_BRIDGE_HTTP_PORT);
+            const bool connected = socket.waitForConnected(200);
+            if (connected) socket.disconnectFromHost();
+            return connected;
+        }
+    }
+
+    HTTPResponse NetworkRequestHelper::HttpGet(const QString &url, bool sendHwid, bool useProxy,
+                                               bool preferHappBridge,
+                                               const QString &userAgentOverride) {
         QNetworkRequest request;
         QNetworkAccessManager accessManager;
         accessManager.setTransferTimeout(10000);
         request.setUrl(url);
-        if (Configs::dataManager->settingsRepo->net_use_proxy || Configs::dataManager->settingsRepo->spmode_system_proxy || useProxy) {
+
+        // Subscription providers may only be reachable through HAPP while HAPP
+        // runs in Proxy mode and OMNIT owns the system TUN. Prefer HAPP's local
+        // HTTP bridge for those requests; this also works before an OMNIT
+        // profile has been started. If HAPP is absent, retain the normal direct
+        // or OMNIT-proxy behaviour. Once OMNIT is running, subscription refresh
+        // can therefore bootstrap through HAPP once and become self-hosting.
+        const bool useHappBridge = preferHappBridge && IsHappBridgeAvailable();
+        const bool useRunningOmnitFallback = preferHappBridge && !useHappBridge &&
+                                             Configs::dataManager->settingsRepo->started_id >= 0;
+        if (useHappBridge) {
+            QNetworkProxy p;
+            p.setType(QNetworkProxy::HttpProxy);
+            p.setHostName(QString::fromLatin1(HAPP_BRIDGE_HOST));
+            p.setPort(HAPP_BRIDGE_HTTP_PORT);
+            accessManager.setProxy(p);
+        } else if (Configs::dataManager->settingsRepo->net_use_proxy ||
+                   Configs::dataManager->settingsRepo->spmode_system_proxy || useProxy ||
+                   useRunningOmnitFallback) {
             if (Configs::dataManager->settingsRepo->started_id < 0) {
                 return HTTPResponse{QObject::tr("Request with proxy but no profile started.")};
             }
@@ -39,7 +73,11 @@ namespace Configs_network {
         }
         // Set attribute
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-        request.setHeader(QNetworkRequest::KnownHeaders::UserAgentHeader, Configs::dataManager->settingsRepo->GetUserAgent());
+        request.setHeader(
+            QNetworkRequest::KnownHeaders::UserAgentHeader,
+            userAgentOverride.isEmpty()
+                ? Configs::dataManager->settingsRepo->GetUserAgent()
+                : userAgentOverride);
         if (Configs::dataManager->settingsRepo->net_insecure) {
             QSslConfiguration c;
             c.setPeerVerifyMode(QSslSocket::PeerVerifyMode::VerifyNone);

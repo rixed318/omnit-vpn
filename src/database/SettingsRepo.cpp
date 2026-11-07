@@ -22,6 +22,7 @@ namespace Configs {
             {"mux_default_on",                &mux_default_on},
             {"fragment_default_on",           &fragment_default_on},
             {"tls_tricks_default_on",         &tls_tricks_default_on},
+            {"omnit_theme_migrated",          &omnit_theme_migrated},
             {"net_use_proxy",                 &net_use_proxy},
             {"remember_enable",               &remember_enable},
             {"skip_cert",                     &skip_cert},

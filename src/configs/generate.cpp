@@ -50,6 +50,8 @@ namespace Configs {
 
             constexpr auto dnsIn = "dns-in";
             constexpr auto mixedIn = "mixed-in";
+            constexpr auto omnitSafeProxyIn = "omnit-safe-proxy-in";
+            constexpr auto omnitDirectProbeIn = "omnit-direct-probe-in";
             constexpr auto tunIn = "tun-in";
             constexpr auto redirectIn = "hijack";
             constexpr auto dnsServerIn = "hijack-dns";
@@ -947,6 +949,29 @@ namespace Configs {
                 inbounds += inboundObj;
             }
 
+            // Dedicated loopback entry for the OMNIT Safe per-profile proxy
+            // bridge. Traffic entering here is forced to the selected VPN
+            // outbound below, while ordinary mixed/TUN traffic keeps the
+            // owner's split-routing policy.
+            inbounds += QJsonObject{
+                {"tag", tags::omnitSafeProxyIn},
+                {"type", "mixed"},
+                {"listen", "127.0.0.1"},
+                {"listen_port", 2081},
+            };
+
+            // Owner-local counterpart used only by OMNIT's public-IP
+            // diagnostics.  It bypasses service routing deliberately, so the
+            // real-IP card stays truthful even when every public IP checker is
+            // selected for the VPN route.  Loopback-only keeps it unavailable
+            // to the LAN.
+            inbounds += QJsonObject{
+                {"tag", tags::omnitDirectProbeIn},
+                {"type", "mixed"},
+                {"listen", "127.0.0.1"},
+                {"listen_port", 2082},
+            };
+
             // Tun
             if (settings.spmode_vpn) {
                 QJsonObject inboundObj;
@@ -1657,6 +1682,26 @@ namespace Configs {
             {"tag", tags::direct}
             });
 
+            // OMNIT Multi-Egress starter pool outbounds
+            ctx.outbounds.append(QJsonObject{
+                {"type", "socks"},
+                {"tag", "proxy-nl"},
+                {"server", "127.0.0.1"},
+                {"server_port", 22101}
+            });
+            ctx.outbounds.append(QJsonObject{
+                {"type", "socks"},
+                {"tag", "proxy-de"},
+                {"server", "127.0.0.1"},
+                {"server_port", 22102}
+            });
+            ctx.outbounds.append(QJsonObject{
+                {"type", "socks"},
+                {"tag", "proxy-us"},
+                {"server", "127.0.0.1"},
+                {"server_port", 22103}
+            });
+
             ctx.result->coreConfig["endpoints"] = ctx.endpoints;
             ctx.result->coreConfig["outbounds"] = ctx.outbounds;
         }
@@ -1672,6 +1717,7 @@ namespace Configs {
                                 {"tag", get_rule_set_name(item)},
                                 {"format", "binary"},
                                 {"url", item},
+                                {"download_detour", tags::proxy},
                             };
                 }
                 else
@@ -1681,6 +1727,7 @@ namespace Configs {
                                     {"tag", item},
                                     {"format", "binary"},
                                     {"url", get_jsdelivr_link(QString::fromUtf8(url.data(), url.size()))},
+                                    {"download_detour", tags::proxy},
                                 };
                     }
             }
@@ -1692,7 +1739,23 @@ namespace Configs {
                             {"tag", tags::adblockRuleSet},
                             {"format", "binary"},
                             {"url", get_jsdelivr_link("https://raw.githubusercontent.com/217heidai/adblockfilters/main/rules/adblocksingbox.srs")},
+                            {"download_detour", tags::proxy},
                         };
+            }
+
+            // OMNIT Adaptive Routing local rule-sets
+            const QString rulesDir = QDir::homePath() + "/.local/share/omnit/rules";
+            const QStringList adaptiveTags = {"nl", "de", "us", "direct"};
+            for (const auto& tag : adaptiveTags) {
+                const QString filePath = rulesDir + QString("/rules_adaptive_%1.json").arg(tag);
+                if (QFile::exists(filePath)) {
+                    ruleSetArray += QJsonObject{
+                        {"type", "local"},
+                        {"tag", QString("rules-adaptive-%1").arg(tag)},
+                        {"format", "source"},
+                        {"path", filePath}
+                    };
+                }
             }
             return ruleSetArray;
         }
@@ -1803,6 +1866,49 @@ namespace Configs {
             appendIfSet(injected.dnsHijack);
             appendIfSet(injected.dnsInReject);
             appendIfSet(injected.redirectSniff);
+            if (!ctx.forTest) {
+                routeRules.append(QJsonObject{
+                    {"inbound", tags::omnitSafeProxyIn},
+                    {"action", "route"},
+                    {"outbound", tags::proxy},
+                });
+                routeRules.append(QJsonObject{
+                    {"inbound", tags::omnitDirectProbeIn},
+                    {"action", "route"},
+                    {"outbound", tags::direct},
+                });
+            }
+
+            // OMNIT Adaptive Routing dynamic rules (applied before general profile rules)
+            const QString omnitRulesDir = QDir::homePath() + "/.local/share/omnit/rules";
+            if (QFile::exists(omnitRulesDir + "/rules_adaptive_direct.json")) {
+                routeRules.append(QJsonObject{
+                    {"rule_set", QJsonArray{"rules-adaptive-direct"}},
+                    {"action", "route"},
+                    {"outbound", tags::direct}
+                });
+            }
+            if (QFile::exists(omnitRulesDir + "/rules_adaptive_de.json")) {
+                routeRules.append(QJsonObject{
+                    {"rule_set", QJsonArray{"rules-adaptive-de"}},
+                    {"action", "route"},
+                    {"outbound", "proxy-de"}
+                });
+            }
+            if (QFile::exists(omnitRulesDir + "/rules_adaptive_us.json")) {
+                routeRules.append(QJsonObject{
+                    {"rule_set", QJsonArray{"rules-adaptive-us"}},
+                    {"action", "route"},
+                    {"outbound", "proxy-us"}
+                });
+            }
+            if (QFile::exists(omnitRulesDir + "/rules_adaptive_nl.json")) {
+                routeRules.append(QJsonObject{
+                    {"rule_set", QJsonArray{"rules-adaptive-nl"}},
+                    {"action", "route"},
+                    {"outbound", "proxy-nl"}
+                });
+            }
             for (const auto& r : profileRules) routeRules.append(r);
             if (!routeChain->isRaw && defOut == blockID) {
                 routeRules.append(QJsonObject{{"action", "reject"}});

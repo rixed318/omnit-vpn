@@ -108,7 +108,7 @@ bool MainWindow::verify_core_pid(QLocalSocket *socket) {
 // Stylesheet themes have a known brightness; plain QStyle themes follow the OS preference.
 static bool themeUsesDarkLog(const QString &theme) {
     const auto lower = theme.toLower();
-    if (lower.contains("vista") || lower.contains("flatgray") || lower.contains("lightblue") || lower.contains("softpink")) {
+    if (lower.contains("omnit") || lower.contains("vista") || lower.contains("flatgray") || lower.contains("lightblue") || lower.contains("softpink")) {
         return false; // light themes
     }
     if (lower.contains("qdarkstyle") || lower.contains("blacksoft")) {
@@ -153,6 +153,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     Configs::dataManager->settingsRepo->theme.toInt(&isNum);
     if (isNum) {
         Configs::dataManager->settingsRepo->theme = "System";
+    }
+    if (!Configs::dataManager->settingsRepo->omnit_theme_migrated) {
+        if (Configs::dataManager->settingsRepo->theme.compare("System", Qt::CaseInsensitive) == 0)
+            Configs::dataManager->settingsRepo->theme = "OMNIT";
+        Configs::dataManager->settingsRepo->omnit_theme_migrated = true;
+        Configs::dataManager->settingsRepo->Save();
     }
     themeManager->ApplyTheme(Configs::dataManager->settingsRepo->theme);
     ui->setupUi(this);
@@ -321,7 +327,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     }
 
     // software_name
-    software_name = "Throne";
+    software_name = "OMNIT";
     software_core_name = "sing-box";
     //
     if (auto dashDir = QDir("dashboard"); !dashDir.exists() && QDir().mkdir("dashboard")) {
@@ -889,6 +895,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     connect(ui->menuRouting_Menu, &QMenu::aboutToShow, this, [=,this]()
     {
         ui->menuRouting_Menu->clear();
+        auto* serviceRouting = ui->menuRouting_Menu->addAction(tr("Сайты и приложения…"));
+        serviceRouting->setToolTip(tr("Выбрать, какие сервисы идут через VPN или напрямую"));
+        connect(serviceRouting, &QAction::triggered, this,
+                &MainWindow::on_menu_omnit_services_triggered);
+        ui->menuRouting_Menu->addSeparator();
+        ui->menu_routing_settings->setText(tr("Расширенные настройки…"));
         ui->menuRouting_Menu->addAction(ui->menu_routing_settings);
 
         auto* actionAdblock = new QAction(ui->menuRouting_Menu);
@@ -1146,4 +1158,3 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
 MainWindow::~MainWindow() {
     delete ui;
 }
-

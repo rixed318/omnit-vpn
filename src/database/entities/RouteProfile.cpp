@@ -7,6 +7,7 @@
 
 #include "include/database/ProfilesRepo.h"
 
+#include "include/configs/OmnitServiceRouting.hpp"
 #include "include/global/Configs.hpp"
 
 namespace Configs {
@@ -508,6 +509,89 @@ namespace Configs {
         defaultRule->protocol = "dns";
         defaultChain->Rules << defaultRule;
         return defaultChain;
+    }
+
+    std::shared_ptr<RouteProfile> RouteProfile::GetOmnitWhitelist() {
+        auto profile = std::make_shared<RouteProfile>();
+        profile->name = "OMNIT Whitelist";
+        profile->defaultOutboundID = directID;
+
+        // Full Xray subscription profiles run as a local Xray instance inside
+        // ThroneCore and connect back to sing-box through a SOCKS bridge. The
+        // Xray instance's real upstream sockets therefore have ThroneCore as
+        // their process path. They must leave through the physical interface;
+        // sending them back to the selected proxy creates an immediate loop.
+        auto omnitCoreDirect = std::make_shared<RouteRule>();
+        omnitCoreDirect->name = "OMNIT core bypass";
+        omnitCoreDirect->type = simpleProcessPathBypass;
+        omnitCoreDirect->action = "route";
+        omnitCoreDirect->outboundID = directID;
+        omnitCoreDirect->process_path = {FindCoreRealPath()};
+        profile->Rules << omnitCoreDirect;
+
+        // HAPP is the temporary encrypted-subscription bridge. Its Xray process
+        // creates the real connection to the selected VPN server. Without this
+        // first-match bypass, a destination that belongs to the whitelist can be
+        // sent to HAPP, then HAPP's own socket is captured by the TUN and sent
+        // back to HAPP again, creating an unbounded proxy loop.
+        auto happCoreDirect = std::make_shared<RouteRule>();
+        happCoreDirect->name = "HAPP core bypass";
+        happCoreDirect->type = simpleProcessPathBypass;
+        happCoreDirect->action = "route";
+        happCoreDirect->outboundID = directID;
+        happCoreDirect->process_path = {"/opt/happ/bin/core/xray"};
+        profile->Rules << happCoreDirect;
+
+        // Infrastructure stays proxied independently from user-facing service
+        // switches: it is required to refresh this machine's subscription and
+        // to reach development downloads that are unavailable on the direct ISP.
+        auto infrastructure = std::make_shared<RouteRule>();
+        infrastructure->name = "OMNIT infrastructure";
+        infrastructure->type = simpleAddressProxy;
+        infrastructure->action = "route";
+        infrastructure->outboundID = proxyID;
+        infrastructure->domain_suffix = {
+            "sourceforge.net",
+            "therobottate.today",
+        };
+        profile->Rules << infrastructure;
+
+        QHash<QString, bool> defaults;
+        for (const auto& service : OmnitServiceCatalog())
+            defaults.insert(service.id, service.defaultProxy);
+        ApplyOmnitServiceChoices(profile, defaults);
+
+        return profile;
+    }
+
+    std::shared_ptr<RouteProfile> RouteProfile::GetOmnitFullTunnel() {
+        auto profile = std::make_shared<RouteProfile>();
+        profile->name = "OMNIT Full Tunnel";
+        profile->defaultOutboundID = proxyID;
+
+        // The selected subscription may itself be served by ThroneCore/Xray.
+        // Its upstream socket must use the physical interface or it would be
+        // captured by this profile and fed back into the same proxy forever.
+        auto omnitCoreDirect = std::make_shared<RouteRule>();
+        omnitCoreDirect->name = "OMNIT core bypass";
+        omnitCoreDirect->type = simpleProcessPathBypass;
+        omnitCoreDirect->action = "route";
+        omnitCoreDirect->outboundID = directID;
+        omnitCoreDirect->process_path = {FindCoreRealPath()};
+        profile->Rules << omnitCoreDirect;
+
+        // The HAPP bridge is another possible transport owner and needs the
+        // same loop-prevention exception. This exception is for the VPN
+        // transport only; browser/application traffic still uses the tunnel.
+        auto happCoreDirect = std::make_shared<RouteRule>();
+        happCoreDirect->name = "HAPP core bypass";
+        happCoreDirect->type = simpleProcessPathBypass;
+        happCoreDirect->action = "route";
+        happCoreDirect->outboundID = directID;
+        happCoreDirect->process_path = {"/opt/happ/bin/core/xray"};
+        profile->Rules << happCoreDirect;
+
+        return profile;
     }
 
     std::shared_ptr<QList<int>> RouteProfile::get_used_outbounds() {

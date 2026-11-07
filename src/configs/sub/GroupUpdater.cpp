@@ -17,6 +17,16 @@ namespace Subscription {
 
     GroupUpdater *groupUpdater = new GroupUpdater;
 
+    namespace {
+        bool LooksLikeHappHwidChallenge(const QByteArray &body) {
+            const auto decoded = QByteArray::fromBase64(body).toLower();
+            // Providers have used both unspecified placeholders. The human
+            // explanation lives in URI fragments and is commonly percent-
+            // encoded, so the invalid endpoint itself is the stable signal.
+            return decoded.contains("0.0.0.0") || decoded.contains("0.0.0.1");
+        }
+    }
+
     int JsonEndIdx(const QString &str, int begin) {
         int sz = str.length();
         int counter = 1;
@@ -846,10 +856,40 @@ namespace Subscription {
             auto groupName = group == nullptr ? content : group->name;
             MW_show_log(">>>>>>>> " + QObject::tr("Requesting subscription: %1").arg(groupName));
 
-            auto resp = NetworkRequestHelper::HttpGet(content, Configs::dataManager->settingsRepo->sub_send_hwid);
+            auto resp = NetworkRequestHelper::HttpGet(
+                content,
+                Configs::dataManager->settingsRepo->sub_send_hwid,
+                false,
+                true);
             if (!resp.error.isEmpty()) {
                 MW_show_log("<<<<<<<< " + QObject::tr("Requesting subscription %1 error: %2").arg(groupName, resp.error + "\n" + resp.data));
                 return;
+            }
+
+            // Some HAPP-oriented providers return syntactically valid VLESS
+            // links to 0.0.0.1 as an error page when the client omits HAPP's
+            // device identity. Do not import those decoys. Retry once with the
+            // same machine ID HAPP uses on Linux and HAPP's subscription UA.
+            if (LooksLikeHappHwidChallenge(resp.data)) {
+                MW_show_log(QObject::tr(
+                    "HAPP HWID challenge detected; retrying with local device identity."));
+                resp = NetworkRequestHelper::HttpGet(
+                    content,
+                    true,
+                    false,
+                    true,
+                    QStringLiteral("Happ/3.3.6"));
+                if (!resp.error.isEmpty()) {
+                    MW_show_log("<<<<<<<< " + QObject::tr(
+                        "HAPP-compatible subscription request %1 error: %2")
+                        .arg(groupName, resp.error));
+                    return;
+                }
+                if (LooksLikeHappHwidChallenge(resp.data)) {
+                    MW_show_log("<<<<<<<< " + QObject::tr(
+                        "Subscription rejected the local HAPP device identity."));
+                    return;
+                }
             }
 
             content = resp.data;

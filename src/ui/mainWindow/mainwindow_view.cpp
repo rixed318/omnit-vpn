@@ -239,6 +239,10 @@ void MainWindow::refresh_startstop_button() {
 
 void MainWindow::update_traffic_graph(int proxyDl, int proxyUp, int directDl, int directUp)
 {
+    m_proxyDownloadRate = qMax(0, proxyDl);
+    m_proxyUploadRate = qMax(0, proxyUp);
+    m_directDownloadRate = qMax(0, directDl);
+    m_directUploadRate = qMax(0, directUp);
     if (speedChartWidget) {
         QMap<SpeedWidget::GraphType, long> pointData;
         pointData[SpeedWidget::OUTBOUND_PROXY_UP] = proxyUp;
