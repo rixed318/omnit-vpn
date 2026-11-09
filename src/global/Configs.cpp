@@ -153,6 +153,18 @@ namespace Configs {
             if (!dataManager->routesRepo->AddRouteProfile(fullTunnel)) fullTunnel.reset();
         }
 
+        std::shared_ptr<RouteProfile> smartRoute;
+        for (const auto& route : dataManager->routesRepo->GetAllRouteProfiles()) {
+            if (route && route->name == "OMNIT Smart") {
+                smartRoute = route;
+                break;
+            }
+        }
+        if (!smartRoute) {
+            smartRoute = RouteProfile::GetOmnitSmart();
+            if (!dataManager->routesRepo->AddRouteProfile(smartRoute)) smartRoute.reset();
+        }
+
         // Full tunnel is the safe default for a fresh OMNIT install. Existing
         // installations retain their current route until the owner switches it.
         if (initializedRoutes && fullTunnel) {
@@ -200,23 +212,28 @@ namespace Configs {
 #endif
     }
 
-    // IsAdmin 主要判断：有无权限启动 Tun
+    // IsAdmin determines whether core has privileges for TUN
     bool IsAdmin(bool forceRenew) {
-        if (isAdminCache >= 0 && !forceRenew) return isAdminCache;
+        if (forceRenew) isAdminCache = -1;
+        if (isAdminCache >= 0) return isAdminCache;
 
         bool admin = false;
 #ifdef Q_OS_WIN
         admin = Windows_IsInAdmin();
         Configs::dataManager->settingsRepo->windows_set_admin = admin;
 #else
-        // Unknown until the core answers; caching that would pin "not elevated" for the session.
+        // Unknown until the core answers; caching false would pin "not elevated" prematurely on startup.
         if (API::defaultClient == nullptr) return false;
-        bool ok;
+        bool ok = false;
         const auto isPrivileged = API::defaultClient->IsPrivileged(&ok);
         if (!ok) return false;
         admin = isPrivileged;
 #endif
-        isAdminCache = admin;
+        if (admin) {
+            isAdminCache = 1;
+        } else {
+            isAdminCache = -1; // Never cache failure so subsequent checks re-query the core
+        }
         return admin;
     }
 

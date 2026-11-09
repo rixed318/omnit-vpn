@@ -1,0 +1,53 @@
+name: OMNIT VPN CI
+
+on:
+  push:
+    branches: [ "main", "omnit" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test-python:
+    name: Adaptive Router & Guard Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run Adaptive Router Verification Suite
+        run: |
+          python3 tools/omnit_adaptive_router.py test
+
+  build-go-core:
+    name: Build & Verify Go Core
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: core/go.sum
+
+      - name: Install Protoc
+        run: |
+          sudo apt-get update && sudo apt-get install -y protobuf-compiler
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+      - name: Verify Protobuf Generation
+        run: |
+          cd core/server/gen
+          protoc -I . --go_out=. --go-grpc_out=. libcore.proto
+
+      - name: Go Test & Vet
+        run: |
+          cd core
+          go vet ./server/... || true

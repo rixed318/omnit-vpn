@@ -48,6 +48,14 @@ var instanceCancel context.CancelFunc
 var xrayInstance *core.Instance
 var xrayGate *xray.Gate
 
+// Multi-Egress Xray nodes state and lifecycle
+var (
+	multiXrayInstances []*core.Instance
+	multiXrayConfigs   []string
+	multiXrayMu        sync.RWMutex
+	multiXrayStop      chan struct{}
+)
+
 // Reached only from Start/Stop, i.e. always under lifecycleMu.
 var extraProcess *process.Process
 var needUnsetDNS bool
@@ -114,23 +122,89 @@ func defaultInterfaceFinder() string {
 	return ifc.Name
 }
 
-// Keeps the live Xray instance's egress on the current default route as the network
-// changes. Test instances are short-lived and set theirs once, so are not tracked.
+func liveMultiXrayInstances() []*core.Instance {
+	multiXrayMu.RLock()
+	defer multiXrayMu.RUnlock()
+	res := make([]*core.Instance, len(multiXrayInstances))
+	copy(res, multiXrayInstances)
+	return res
+}
+
+func closeMultiXray() {
+	multiXrayMu.Lock()
+	if multiXrayStop != nil {
+		close(multiXrayStop)
+		multiXrayStop = nil
+	}
+	instances := multiXrayInstances
+	multiXrayInstances = nil
+	multiXrayConfigs = nil
+	multiXrayMu.Unlock()
+
+	for _, inst := range instances {
+		if inst != nil {
+			_ = inst.Close()
+		}
+	}
+}
+
+// superviseMultiXray monitors started multi-egress Xray nodes.
+// If an instance fails, it recovers and restarts it.
+func superviseMultiXray(stop chan struct{}) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			multiXrayMu.Lock()
+			if multiXrayStop == nil {
+				multiXrayMu.Unlock()
+				return
+			}
+			for i, inst := range multiXrayInstances {
+				if inst == nil && i < len(multiXrayConfigs) {
+					cfg := multiXrayConfigs[i]
+					if cfg != "" {
+						newInst, err := xray.CreateXrayInstance(cfg)
+						if err == nil {
+							newInst.SetEgressInterface(defaultInterfaceFinder())
+							if startErr := newInst.Start(); startErr == nil {
+								log.Printf("[OMNIT-CORE] Recovered Xray node %d successfully\n", i)
+								multiXrayInstances[i] = newInst
+							} else {
+								_ = newInst.Close()
+							}
+						}
+					}
+				}
+			}
+			multiXrayMu.Unlock()
+		}
+	}
+}
+
+// Keeps the live Xray instances' egress on the current default route as the network changes.
 func init() {
 	m := boxdns.DnsManagerInstance
 	if m == nil || m.Monitor == nil {
 		return
 	}
 	m.Monitor.RegisterCallback(func(ifc *control.Interface, _ int) {
-		inst := liveXrayInstance()
-		if inst == nil {
-			return
-		}
 		name := ""
 		if ifc != nil {
 			name = ifc.Name
 		}
-		inst.SetEgressInterface(name)
+		if inst := liveXrayInstance(); inst != nil {
+			inst.SetEgressInterface(name)
+		}
+		for _, mInst := range liveMultiXrayInstances() {
+			if mInst != nil {
+				mInst.SetEgressInterface(name)
+			}
+		}
 	})
 }
 
@@ -377,6 +451,28 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (out *gen.Err
 		}
 	}
 
+	if len(in.XrayFullConfigs) > 0 {
+		multiInstances, e := startXrayFullConfigs(in.XrayFullConfigs)
+		if e != nil {
+			err = e
+			if extraProcess != nil {
+				extraProcess.Stop()
+				extraProcess = nil
+			}
+			closeXray()
+			closeMultiXray()
+			return
+		}
+		multiXrayMu.Lock()
+		multiXrayInstances = multiInstances
+		multiXrayConfigs = make([]string, len(in.XrayFullConfigs))
+		copy(multiXrayConfigs, in.XrayFullConfigs)
+		multiXrayStop = make(chan struct{})
+		go superviseMultiXray(multiXrayStop)
+		multiXrayMu.Unlock()
+		log.Printf("[OMNIT-CORE] Multi-Egress: started %d concurrent Xray nodes\n", len(multiInstances))
+	}
+
 	box, cancel, err := boxmain.Create([]byte(*in.CoreConfig))
 	if err != nil {
 		if extraProcess != nil {
@@ -384,6 +480,7 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (out *gen.Err
 			extraProcess = nil
 		}
 		closeXray()
+		closeMultiXray()
 		return
 	}
 	setBoxInstance(box, cancel)
@@ -397,6 +494,7 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (out *gen.Err
 				extraProcess = nil
 			}
 			closeXray()
+			closeMultiXray()
 		}
 
 		tunCIDR := in.GetTunIpv4Cidr()
@@ -459,6 +557,7 @@ func (s *server) Stop(ctx context.Context, in *gen.EmptyReq) (out *gen.ErrorResp
 	}
 
 	closeXray()
+	closeMultiXray()
 
 	return
 }
@@ -475,6 +574,12 @@ func (s *server) CheckConfig(ctx context.Context, in *gen.LoadConfigReq) (out *g
 			out.Error = To(fmt.Sprintf("CheckConfig panic: %v", r))
 		}
 	}()
+	for _, cfg := range in.XrayFullConfigs {
+		if err := xray.CheckXrayConfig(cfg); err != nil {
+			out.Error = To(err.Error())
+			return
+		}
+	}
 	if in.GetNeedXray() {
 		// Xray-format configs can't be validated by sing-box; hand them to the
 		// Xray core instead.

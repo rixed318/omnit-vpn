@@ -22,9 +22,11 @@ import socket
 import sqlite3
 import struct
 import subprocess
+import ssl
 import sys
 import tempfile
 import time
+from collections import defaultdict, deque
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Configuration Defaults
@@ -32,6 +34,7 @@ DEFAULT_OMNIT_DIR = Path.home() / ".local" / "share" / "omnit"
 DEFAULT_DB_PATH = DEFAULT_OMNIT_DIR / "vpn" / "adaptive_routing.db"
 DEFAULT_RULES_DIR = DEFAULT_OMNIT_DIR / "rules"
 DEFAULT_SOCKET_PATH = DEFAULT_OMNIT_DIR / "vpn" / "adaptive_router.sock"
+DEFAULT_LOG_PATH = DEFAULT_OMNIT_DIR / "config" / "logs" / "throne.log"
 
 # Routing Outbound Tags
 TAG_DIRECT = "direct"
@@ -522,47 +525,85 @@ class AdaptiveRouterEngine:
             conn.commit()
         self.synchronizer.sync()
 
-    async def probe_socks_node(self, socks_port: int, domain: str, timeout: float = 3.5) -> Tuple[bool, int, str]:
-        """Perform lightweight SOCKS5 handshake & HTTP HEAD to target domain."""
+    async def probe_socks_node(self, socks_port: int, domain: str, timeout: float = 4.0) -> Tuple[bool, int, str]:
+        """Perform 3-tier active probe (Tier 1: TCP/SOCKS5 -> Tier 2: TLS SNI -> Tier 3: HTTP HEAD)."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._probe_socks_sync, socks_port, domain, timeout)
+
+    @staticmethod
+    def _probe_socks_sync(socks_port: int, domain: str, timeout: float = 4.0) -> Tuple[bool, int, str]:
         start = time.perf_counter()
-        reader, writer = None, None
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection("127.0.0.1", socks_port), timeout=timeout
-            )
-            # SOCKS5 greeting: VER=5, NMETHODS=1, METHOD=0 (no auth)
-            writer.write(b"\x05\x01\x00")
-            await writer.drain()
-            resp = await asyncio.wait_for(reader.readexactly(2), timeout=1.5)
-            if resp != b"\x05\x00":
-                return False, int((time.perf_counter() - start) * 1000), "SOCKS5 auth rejected"
+            # Tier 1: TCP & SOCKS5 Handshake
+            s.connect(("127.0.0.1", socks_port))
+            s.sendall(b"\x05\x01\x00")
+            auth_resp = s.recv(2)
+            if auth_resp != b"\x05\x00":
+                return False, int((time.perf_counter() - start) * 1000), "[TCP] SOCKS auth rejected"
 
-            # SOCKS5 CONNECT request by domain: VER=5, CMD=1, RSV=0, ATYP=3, [LEN][DOMAIN], PORT=443
-            domain_bytes = domain.encode("idna")
-            req = struct.pack("!BBBB", 5, 1, 0, 3) + bytes([len(domain_bytes)]) + domain_bytes + struct.pack("!H", 443)
-            writer.write(req)
-            await writer.drain()
-
-            reply = await asyncio.wait_for(reader.read(10), timeout=timeout)
+            domain_b = domain.encode("idna")
+            req = struct.pack("!BBBB", 5, 1, 0, 3) + bytes([len(domain_b)]) + domain_b + struct.pack("!H", 443)
+            s.sendall(req)
+            reply = s.recv(10)
             if len(reply) < 4 or reply[1] != 0x00:
                 rep_code = reply[1] if len(reply) >= 2 else -1
-                return False, int((time.perf_counter() - start) * 1000), f"SOCKS5 connect error 0x{rep_code:02x}"
+                return False, int((time.perf_counter() - start) * 1000), f"[TCP] connect error 0x{rep_code:02x}"
 
-            latency_ms = int((time.perf_counter() - start) * 1000)
-            return True, latency_ms, "ok"
-        except asyncio.TimeoutError:
-            return False, int((time.perf_counter() - start) * 1000), "timeout"
-        except ConnectionRefusedError:
-            return False, int((time.perf_counter() - start) * 1000), "connection_refused"
-        except Exception as e:
-            return False, int((time.perf_counter() - start) * 1000), str(e)
-        finally:
-            if writer:
-                writer.close()
+            # Tier 2: TLS SNI Handshake
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+            try:
+                ss = ssl_ctx.wrap_socket(s, server_hostname=domain)
+            except (ssl.SSLError, OSError) as e:
+                return False, int((time.perf_counter() - start) * 1000), f"[TLS] handshake failed: {e}"
+
+            # Tier 3: HTTP HEAD Verification
+            try:
+                head_req = (
+                    f"HEAD / HTTP/1.1\r\n"
+                    f"Host: {domain}\r\n"
+                    f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) OMNIT-Probe/2.0\r\n"
+                    f"Accept: */*\r\n"
+                    f"Connection: close\r\n\r\n"
+                ).encode("ascii")
+                ss.sendall(head_req)
+                resp_data = ss.recv(512).decode("iso-8859-1", errors="replace")
+                first_line = resp_data.splitlines()[0] if resp_data else ""
+                parts = first_line.split()
+                status_code = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
+                latency_ms = int((time.perf_counter() - start) * 1000)
+
+                if status_code in (200, 204, 301, 302, 303, 304, 307, 308, 400, 404, 405):
+                    return True, latency_ms, f"[HTTP] reachable ({status_code})"
+                elif status_code in (403, 451):
+                    return False, latency_ms, f"[HTTP] blocked: status {status_code}"
+                elif status_code == 0:
+                    return False, latency_ms, "[HTTP] empty response from origin"
+                else:
+                    return True, latency_ms, f"[HTTP] origin responded ({status_code})"
+            except (socket.timeout, TimeoutError):
+                return False, int((time.perf_counter() - start) * 1000), "[HTTP] response timeout"
+            except Exception as e:
+                return False, int((time.perf_counter() - start) * 1000), f"[HTTP] request failed: {e}"
+            finally:
                 try:
-                    await writer.wait_closed()
+                    ss.close()
                 except Exception:
                     pass
+        except (socket.timeout, TimeoutError):
+            return False, int((time.perf_counter() - start) * 1000), "[TCP] connection timeout"
+        except ConnectionRefusedError:
+            return False, int((time.perf_counter() - start) * 1000), "[TCP] node offline (connection refused)"
+        except Exception as e:
+            return False, int((time.perf_counter() - start) * 1000), f"[TCP] error: {e}"
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
 
     async def diagnose_and_heal(self, domain: str) -> Dict[str, Any]:
         """Diagnose connection issue and select optimal country without flooding."""
@@ -655,29 +696,105 @@ class AdaptiveRouterEngine:
             results[n["outbound_tag"]] = {"alive": ok, "latency_ms": lat}
         return results
 
-    async def run_daemon(self, interval: float = 30.0, health_interval: float = 60.0) -> None:
-        """Run ongoing background maintenance: pruning expired routes and checking node health."""
-        print(f"[OMNIT-ROUTER] Daemon started. Prune interval={interval}s, Node health interval={health_interval}s")
-        last_health_check = 0.0
-        while True:
+class LogEventWatcher:
+    """Tails Throne/sing-box log, correlates IP to domain via DNS events, and triggers auto-heal on recurring transport errors."""
+
+    DNS_PATTERN = re.compile(r"dns:\s*(?:exchanged|cached)\s+A\s+([\w.-]+?)\.?\s+\d+\s+IN\s+A\s+([0-9.]+)")
+    ERROR_PATTERN = re.compile(
+        r"(?:outbound/.*?|inbound/.*?):\s*(?:connection to|dial tcp)\s+([0-9.]+):[0-9]+.*?"
+        r"(connection reset by peer|connection timed out|i/o timeout|handshake failed|connection refused|context deadline exceeded)",
+        re.IGNORECASE,
+    )
+
+    def __init__(self, engine: AdaptiveRouterEngine, log_path: Path = DEFAULT_LOG_PATH):
+        self.engine = engine
+        self.log_path = log_path
+        self._ip_to_domain: Dict[str, Tuple[str, float]] = {}
+        self._domain_failures: Dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=10))
+        self._stop_event = asyncio.Event()
+
+    def handle_line(self, line: str) -> Optional[str]:
+        # 1. Check DNS resolution
+        dns_match = self.DNS_PATTERN.search(line)
+        if dns_match:
+            domain, ip = dns_match.group(1).lower().rstrip("."), dns_match.group(2)
+            self._ip_to_domain[ip] = (domain, time.time())
+            return None
+
+        # 2. Check connection error
+        err_match = self.ERROR_PATTERN.search(line)
+        if err_match:
+            ip = err_match.group(1)
+            record = self._ip_to_domain.get(ip)
+            if not record:
+                return None
+            domain, dns_time = record
+            if time.time() - dns_time > 600:
+                return None
+
             now = time.time()
-            try:
-                # 1. Prune expired cache
-                pruned = self.db.prune_expired_routes()
-                if pruned > 0:
-                    print(f"[OMNIT-ROUTER] Pruned {pruned} expired routes. Resynchronizing rule sets...")
-                    self.synchronizer.sync()
+            dq = self._domain_failures[domain]
+            dq.append(now)
 
-                # 2. Check node health
-                if now - last_health_check >= health_interval:
-                    last_health_check = now
-                    health_res = await self.check_all_nodes()
-                    alive_count = sum(1 for v in health_res.values() if v["alive"])
-                    print(f"[OMNIT-ROUTER] Health check: {alive_count}/{len(health_res)} nodes alive")
-            except Exception as e:
-                print(f"[OMNIT-ROUTER] Daemon error: {e}", file=sys.stderr)
+            recent_failures = [t for t in dq if now - t <= 60.0]
+            if len(recent_failures) >= 2:
+                dq.clear()
+                return domain
+        return None
 
-            await asyncio.sleep(interval)
+    async def run(self) -> None:
+        """Tails the log file asynchronously."""
+        if not self.log_path.exists():
+            return
+        try:
+            with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(0, os.SEEK_END)
+                while not self._stop_event.is_set():
+                    line = f.readline()
+                    if not line:
+                        await asyncio.sleep(0.5)
+                        continue
+                    failed_domain = self.handle_line(line)
+                    if failed_domain:
+                        print(f"[OMNIT-EVENT] Recurring network errors for {failed_domain}, initiating autonomous heal...")
+                        asyncio.create_task(self.engine.diagnose_and_heal(failed_domain))
+        except Exception as e:
+            print(f"[OMNIT-EVENT] Log watcher error: {e}", file=sys.stderr)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+
+    async def run_daemon(self, interval: float = 30.0, health_interval: float = 60.0) -> None:
+        """Run ongoing background maintenance: pruning expired routes, checking node health, and watching network error events."""
+        print(f"[OMNIT-ROUTER] Daemon started. Prune interval={interval}s, Node health interval={health_interval}s")
+        watcher = LogEventWatcher(self)
+        watcher_task = asyncio.create_task(watcher.run())
+
+        last_health_check = 0.0
+        try:
+            while True:
+                now = time.time()
+                try:
+                    # 1. Prune expired cache
+                    pruned = self.db.prune_expired_routes()
+                    if pruned > 0:
+                        print(f"[OMNIT-ROUTER] Pruned {pruned} expired routes. Resynchronizing rule sets...")
+                        self.synchronizer.sync()
+
+                    # 2. Check node health
+                    if now - last_health_check >= health_interval:
+                        last_health_check = now
+                        health_res = await self.check_all_nodes()
+                        alive_count = sum(1 for v in health_res.values() if v["alive"])
+                        print(f"[OMNIT-ROUTER] Health check: {alive_count}/{len(health_res)} nodes alive")
+                except Exception as e:
+                    print(f"[OMNIT-ROUTER] Daemon error: {e}", file=sys.stderr)
+
+                await asyncio.sleep(interval)
+        finally:
+            watcher.stop()
+            watcher_task.cancel()
 
 
 def install_systemd_service(python_exec: Optional[str] = None) -> Path:
@@ -772,7 +889,25 @@ def run_tests() -> int:
         dec2_cleared = engine.resolve("whop.com")
         assert dec2_cleared.level == 6, f"Unpin failed: {dec2_cleared}"
 
-        print("[TEST] ALL 8 CORE VERIFICATION TESTS PASSED SUCCESSFULLY!")
+        # 9. Real-time LogEventWatcher correlation and recurring error detection
+        watcher = LogEventWatcher(engine)
+        dns_line = "2026-11-09 18:00:00 [INF] [ui] INFO[100] [1234 50ms] dns: exchanged A test-event.org. 300 IN A 198.51.100.77"
+        res_dns = watcher.handle_line(dns_line)
+        assert res_dns is None, "DNS line should not trigger failure"
+        assert "198.51.100.77" in watcher._ip_to_domain, "IP to domain mapping failed"
+        assert watcher._ip_to_domain["198.51.100.77"][0] == "test-event.org"
+
+        err1 = "2026-11-09 18:00:01 [INF] [ui] outbound/socks[proxy]: connection to 198.51.100.77:443: connection reset by peer"
+        assert watcher.handle_line(err1) is None, "First failure should not trigger heal"
+        err2 = "2026-11-09 18:00:02 [INF] [ui] outbound/socks[proxy]: dial tcp 198.51.100.77:443: connection timed out"
+        triggered_domain = watcher.handle_line(err2)
+        assert triggered_domain == "test-event.org", f"Second failure did not trigger expected domain: {triggered_domain}"
+
+        # 10. 3-Tier probe stages: verify TCP stage handling on unreachable port
+        unreachable_res, _, stage = AdaptiveRouterEngine._probe_socks_sync(1, "example.com", timeout=0.2)
+        assert not unreachable_res and stage.startswith("[TCP]"), f"Probe did not correctly identify TCP stage: {stage}"
+
+        print("[TEST] ALL 10 CORE VERIFICATION TESTS PASSED SUCCESSFULLY!")
         return 0
     finally:
         shutil.rmtree(test_dir, ignore_errors=True)

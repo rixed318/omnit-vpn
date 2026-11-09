@@ -248,6 +248,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
         }
         setup_rpc(socket);
         Configs::dataManager->settingsRepo->core_running = true;
+        if (Configs::IsAdmin(true)) {
+            m_privilegeRequired = false;
+        }
         LOG_INFO(QString("elevated: %1").arg(Configs::IsAdmin() ? "yes" : "no"));
         MW_dialog_message(MwMessage::CoreStarted, {Int2String(profileId)});
     });

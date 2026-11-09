@@ -1708,7 +1708,7 @@ namespace Configs {
 
         // --------------------------------------------------------------- route
 
-        QJsonArray buildRuleSetArray(const BuildContext &ctx) {
+        QJsonArray buildRuleSetArray(const BuildContext &ctx, bool isOmnitSmart = false) {
             QJsonArray ruleSetArray;
             for (const auto &item: ctx.prerequisites.routing.neededRuleSets) {
                 if (auto url = QUrl(item); url.isValid() && url.fileName().contains(".srs")) {
@@ -1743,18 +1743,28 @@ namespace Configs {
                         };
             }
 
-            // OMNIT Adaptive Routing local rule-sets
-            const QString rulesDir = QDir::homePath() + "/.local/share/omnit/rules";
-            const QStringList adaptiveTags = {"nl", "de", "us", "direct"};
-            for (const auto& tag : adaptiveTags) {
-                const QString filePath = rulesDir + QString("/rules_adaptive_%1.json").arg(tag);
-                if (QFile::exists(filePath)) {
-                    ruleSetArray += QJsonObject{
-                        {"type", "local"},
-                        {"tag", QString("rules-adaptive-%1").arg(tag)},
-                        {"format", "source"},
-                        {"path", filePath}
-                    };
+            // OMNIT Adaptive Routing local rule-sets (strictly isolated to OMNIT Smart profile)
+            if (isOmnitSmart) {
+                const QString rulesDir = QDir::homePath() + "/.local/share/omnit/rules";
+                QDir().mkpath(rulesDir);
+                const QStringList adaptiveTags = {"nl", "de", "us", "direct"};
+                for (const auto& tag : adaptiveTags) {
+                    const QString filePath = rulesDir + QString("/rules_adaptive_%1.json").arg(tag);
+                    if (!QFile::exists(filePath)) {
+                        QFile f(filePath);
+                        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                            f.write("{\n  \"version\": 1,\n  \"rules\": []\n}\n");
+                            f.close();
+                        }
+                    }
+                    if (QFile::exists(filePath)) {
+                        ruleSetArray += QJsonObject{
+                            {"type", "local"},
+                            {"tag", QString("rules-adaptive-%1").arg(tag)},
+                            {"format", "source"},
+                            {"path", filePath}
+                        };
+                    }
                 }
             }
             return ruleSetArray;
@@ -1768,6 +1778,7 @@ namespace Configs {
                 return;
             }
             routeChain = std::make_shared<RouteProfile>(*routeChain);
+            const bool isOmnitSmart = (routeChain->name == QStringLiteral("OMNIT Smart"));
             const auto &routeDeps = ctx.prerequisites.routing;
 
             QJsonObject rawRouteObj;
@@ -1834,7 +1845,7 @@ namespace Configs {
             }
 
             // rulesets
-            auto ruleSetArray = buildRuleSetArray(ctx);
+            auto ruleSetArray = buildRuleSetArray(ctx, isOmnitSmart);
 
             if (auto mismatch = bridgeIngressMismatch(ctx); !mismatch.isEmpty()) {
                 ctx.error = mismatch;
@@ -1879,35 +1890,37 @@ namespace Configs {
                 });
             }
 
-            // OMNIT Adaptive Routing dynamic rules (applied before general profile rules)
-            const QString omnitRulesDir = QDir::homePath() + "/.local/share/omnit/rules";
-            if (QFile::exists(omnitRulesDir + "/rules_adaptive_direct.json")) {
-                routeRules.append(QJsonObject{
-                    {"rule_set", QJsonArray{"rules-adaptive-direct"}},
-                    {"action", "route"},
-                    {"outbound", tags::direct}
-                });
-            }
-            if (QFile::exists(omnitRulesDir + "/rules_adaptive_de.json")) {
-                routeRules.append(QJsonObject{
-                    {"rule_set", QJsonArray{"rules-adaptive-de"}},
-                    {"action", "route"},
-                    {"outbound", "proxy-de"}
-                });
-            }
-            if (QFile::exists(omnitRulesDir + "/rules_adaptive_us.json")) {
-                routeRules.append(QJsonObject{
-                    {"rule_set", QJsonArray{"rules-adaptive-us"}},
-                    {"action", "route"},
-                    {"outbound", "proxy-us"}
-                });
-            }
-            if (QFile::exists(omnitRulesDir + "/rules_adaptive_nl.json")) {
-                routeRules.append(QJsonObject{
-                    {"rule_set", QJsonArray{"rules-adaptive-nl"}},
-                    {"action", "route"},
-                    {"outbound", "proxy-nl"}
-                });
+            // OMNIT Adaptive Routing dynamic rules (applied ONLY in OMNIT Smart profile)
+            if (isOmnitSmart) {
+                const QString omnitRulesDir = QDir::homePath() + "/.local/share/omnit/rules";
+                if (QFile::exists(omnitRulesDir + "/rules_adaptive_direct.json")) {
+                    routeRules.append(QJsonObject{
+                        {"rule_set", QJsonArray{"rules-adaptive-direct"}},
+                        {"action", "route"},
+                        {"outbound", tags::direct}
+                    });
+                }
+                if (QFile::exists(omnitRulesDir + "/rules_adaptive_de.json")) {
+                    routeRules.append(QJsonObject{
+                        {"rule_set", QJsonArray{"rules-adaptive-de"}},
+                        {"action", "route"},
+                        {"outbound", "proxy-de"}
+                    });
+                }
+                if (QFile::exists(omnitRulesDir + "/rules_adaptive_us.json")) {
+                    routeRules.append(QJsonObject{
+                        {"rule_set", QJsonArray{"rules-adaptive-us"}},
+                        {"action", "route"},
+                        {"outbound", "proxy-us"}
+                    });
+                }
+                if (QFile::exists(omnitRulesDir + "/rules_adaptive_nl.json")) {
+                    routeRules.append(QJsonObject{
+                        {"rule_set", QJsonArray{"rules-adaptive-nl"}},
+                        {"action", "route"},
+                        {"outbound", "proxy-nl"}
+                    });
+                }
             }
             for (const auto& r : profileRules) routeRules.append(r);
             if (!routeChain->isRaw && defOut == blockID) {

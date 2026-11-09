@@ -65,6 +65,8 @@ message LoadConfigReq {
   // Seconds without gated traffic before a lazily started instance is shut down
   // again. 0 keeps it resident once it has started.
   optional int32 xray_idle_seconds = 15 [default = 0];
+  // Multi-Egress standalone Xray full configs for concurrent outbounds (e.g. NL, DE, US).
+  repeated string xray_full_configs = 16;
 }
 
 message URLTestResp {

@@ -26,7 +26,8 @@ from typing import Any
 API_VERSION = 1
 WIRE_PREFIX = b"OMNIT-CONTROL/1 "
 DEFAULT_APP_DATA = Path.home() / ".local" / "share" / "omnit"
-DEFAULT_LAUNCHER = Path.home() / ".local" / "bin" / "omnit"
+VPN_LAUNCHER = Path.home() / ".local" / "bin" / "omnit-vpn"
+DEFAULT_LAUNCHER = VPN_LAUNCHER if VPN_LAUNCHER.exists() else Path.home() / ".local" / "bin" / "omnit"
 DEFAULT_LOG_PATH = DEFAULT_APP_DATA / "config" / "logs" / "throne.log"
 VPN_EGRESS_PROXY = "http://127.0.0.1:2081"
 DIRECT_EGRESS_PROXY = "http://127.0.0.1:2082"
@@ -422,19 +423,20 @@ def status(app_data: Path = DEFAULT_APP_DATA) -> VpnStatus:
 
 def ensure_gui(
     *,
-    launcher: Path = DEFAULT_LAUNCHER,
+    launcher: Path | None = None,
     app_data: Path = DEFAULT_APP_DATA,
-    timeout: float = 8.0,
+    timeout: float = 10.0,
 ) -> VpnStatus:
+    active_launcher = launcher or (VPN_LAUNCHER if VPN_LAUNCHER.exists() else DEFAULT_LAUNCHER)
     current = status(app_data)
     if current.api_available:
         return current
-    if not launcher.is_file() or not os.access(launcher, os.X_OK):
-        raise VpnAdapterError(f"VPN launcher is missing: {launcher}")
+    if not active_launcher.is_file() or not os.access(active_launcher, os.X_OK):
+        raise VpnAdapterError(f"VPN launcher is missing: {active_launcher}")
     if not current.gui_running:
         try:
             subprocess.Popen(
-                [str(launcher)],
+                [str(active_launcher)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -448,6 +450,15 @@ def ensure_gui(
             return current
         time.sleep(0.15)
     raise VpnAdapterError("OMNIT VPN started but its control API did not appear")
+
+
+def open_gui(app_data: Path = DEFAULT_APP_DATA) -> VpnStatus:
+    """Open or bring the standalone OMNIT VPN application window to the foreground."""
+    ensure_gui(app_data=app_data)
+    try:
+        return request("show", app_data=app_data)
+    except Exception:
+        return status(app_data)
 
 
 def control(action: str, **parameters: Any) -> VpnStatus:

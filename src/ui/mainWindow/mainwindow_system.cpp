@@ -209,7 +209,10 @@ bool MainWindow::get_elevated_permissions(ExitReason reason) {
         MW_show_log(tr("User opted for no privilege req, some features may not work"));
         return true;
     }
-    if (Configs::IsAdmin()) return true;
+    if (Configs::IsAdmin(true)) {
+        m_privilegeRequired = false;
+        return true;
+    }
     m_privilegeRequired = true;
     if (m_suppressConnectionPrompts || m_privilegeRequestInProgress) return false;
     // QMessageBox runs a nested event loop. Ignore repeated requests until both

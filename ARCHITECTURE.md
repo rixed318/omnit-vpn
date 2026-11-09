@@ -70,3 +70,4 @@ The router distinguishes between kernel/network failures and application errors:
 - Physical interface detection uses `netlink.RouteGet` to identify the active gateway (`enp4s0` or Wi-Fi `wlan*`).
 - Outgoing proxy transport binds to the active physical interface, avoiding routing loops inside `throne-tun`.
 - Linux `fwmark` avoids collision with sing-box default mark `0x2024`.
+

@@ -594,6 +594,42 @@ namespace Configs {
         return profile;
     }
 
+    std::shared_ptr<RouteProfile> RouteProfile::GetOmnitSmart() {
+        auto profile = std::make_shared<RouteProfile>();
+        profile->name = "OMNIT Smart";
+        profile->defaultOutboundID = proxyID;
+
+        auto omnitCoreDirect = std::make_shared<RouteRule>();
+        omnitCoreDirect->name = "OMNIT core bypass";
+        omnitCoreDirect->type = simpleProcessPathBypass;
+        omnitCoreDirect->action = "route";
+        omnitCoreDirect->outboundID = directID;
+        omnitCoreDirect->process_path = {FindCoreRealPath()};
+        profile->Rules << omnitCoreDirect;
+
+        auto happCoreDirect = std::make_shared<RouteRule>();
+        happCoreDirect->name = "HAPP core bypass";
+        happCoreDirect->type = simpleProcessPathBypass;
+        happCoreDirect->action = "route";
+        happCoreDirect->outboundID = directID;
+        happCoreDirect->process_path = {"/opt/happ/bin/core/xray"};
+        profile->Rules << happCoreDirect;
+
+        auto ruGovProtected = std::make_shared<RouteRule>();
+        ruGovProtected->name = "Protected Russian infrastructure";
+        ruGovProtected->type = simpleAddressProxy;
+        ruGovProtected->action = "route";
+        ruGovProtected->outboundID = directID;
+        ruGovProtected->domain_suffix = {
+            "gosuslugi.ru", "esia.gosuslugi.ru", "nalog.ru", "nalog.gov.ru",
+            "sber.ru", "sberbank.ru", "tbank.ru", "tinkoff.ru",
+            "vtb.ru", "cbr.ru", "mos.ru", "pki.gov.ru"
+        };
+        profile->Rules << ruGovProtected;
+
+        return profile;
+    }
+
     std::shared_ptr<QList<int>> RouteProfile::get_used_outbounds() {
         auto res = std::make_shared<QList<int>>();
         if (isRaw) {

@@ -94,6 +94,10 @@ namespace Configs {
         // are sent directly, otherwise the VPN would route back into itself.
         static std::shared_ptr<RouteProfile> GetOmnitFullTunnel();
 
+        // Managed smart adaptive routing preset (OMNIT Adaptive Routing 2.0):
+        // dynamic multi-egress rule-sets (NL/DE/US/Direct) with autonomous learning.
+        static std::shared_ptr<RouteProfile> GetOmnitSmart();
+
         std::shared_ptr<QList<int>> get_used_outbounds();
 
         std::shared_ptr<QStringList> get_used_rule_sets();

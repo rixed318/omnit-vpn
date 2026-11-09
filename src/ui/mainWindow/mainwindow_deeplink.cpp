@@ -58,6 +58,7 @@ QString omnitRouteMode(const std::shared_ptr<Configs::RouteProfile> &route) {
     if (!route) return QStringLiteral("unknown");
     if (route->name == QStringLiteral("OMNIT Full Tunnel")) return QStringLiteral("full");
     if (route->name == QStringLiteral("OMNIT Whitelist")) return QStringLiteral("split");
+    if (route->name == QStringLiteral("OMNIT Smart")) return QStringLiteral("smart");
     return QStringLiteral("custom");
 }
 
@@ -247,6 +248,10 @@ QByteArray MainWindow::handleOmnitControlRequest(const QByteArray &request) {
         response["error"] = QStringLiteral("unknown_action");
     }
 
+    if (Configs::IsAdmin(true)) {
+        m_privilegeRequired = false;
+    }
+
     if (m_privilegeRequired) {
         accepted = false;
         response["error"] = QStringLiteral("core_privileges_required");
@@ -266,6 +271,8 @@ QByteArray MainWindow::handleOmnitControlRequest(const QByteArray &request) {
     response["accepted"] = accepted;
     response["state"] = state;
     response["connected"] = running != nullptr;
+    response["coreRunning"] = settings->core_running;
+    response["elevated"] = Configs::IsAdmin();
     response["tunEnabled"] = settings->spmode_vpn;
     response["systemProxyEnabled"] = settings->spmode_system_proxy;
     response["updatedAt"] = QDateTime::currentMSecsSinceEpoch();

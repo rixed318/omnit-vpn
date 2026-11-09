@@ -27,7 +27,6 @@ case "$GOOS" in
     export CGO_ENABLED=1 CGO_LDFLAGS="-weak_framework UniformTypeIdentifiers"
     ;;
   linux)
-    TAGS+=",with_naive_outbound"
     export CGO_ENABLED=1
     ;;
 esac
