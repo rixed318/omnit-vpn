@@ -165,9 +165,12 @@ func superviseMultiXray(stop chan struct{}) {
 				return
 			}
 			for i, inst := range multiXrayInstances {
-				if inst == nil && i < len(multiXrayConfigs) {
+				if (inst == nil || !inst.IsRunning()) && i < len(multiXrayConfigs) {
 					cfg := multiXrayConfigs[i]
 					if cfg != "" {
+						if inst != nil {
+							_ = inst.Close()
+						}
 						newInst, err := xray.CreateXrayInstance(cfg)
 						if err == nil {
 							newInst.SetEgressInterface(defaultInterfaceFinder())

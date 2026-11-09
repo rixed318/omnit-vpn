@@ -170,6 +170,7 @@ class AdaptiveDatabase:
     def get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=10.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 10000;")
         return conn
 
     def init_db(self) -> None:
@@ -422,6 +423,8 @@ class AdaptiveRouterEngine:
     def __init__(self, db_path: Path = DEFAULT_DB_PATH, rules_dir: Path = DEFAULT_RULES_DIR):
         self.db = AdaptiveDatabase(db_path)
         self.synchronizer = RuleSetSynchronizer(rules_dir, self.db)
+        self._in_flight_heals: Set[str] = set()
+        self._in_flight_lock = asyncio.Lock()
 
     def resolve(self, domain_or_target: str) -> RouteDecision:
         """Resolve route for domain following 6-level priority hierarchy."""
@@ -608,75 +611,90 @@ class AdaptiveRouterEngine:
     async def diagnose_and_heal(self, domain: str) -> Dict[str, Any]:
         """Diagnose connection issue and select optimal country without flooding."""
         d = normalize_domain(domain)
-        result_report = {
-            "domain": d,
-            "previous_route": None,
-            "new_route": None,
-            "probed": [],
-            "action": "none",
-        }
+        async with self._in_flight_lock:
+            if d in self._in_flight_heals:
+                return {
+                    "domain": d,
+                    "previous_route": None,
+                    "new_route": None,
+                    "probed": [],
+                    "action": "debounced_in_flight",
+                }
+            self._in_flight_heals.add(d)
 
-        # Check safety budget
-        current_hourly_probes = self.db.get_hourly_probe_count()
-        if current_hourly_probes >= MAX_HOURLY_PROBES:
-            result_report["action"] = "rate_limited"
-            result_report["reason"] = f"Hourly probe budget exhausted ({current_hourly_probes}/{MAX_HOURLY_PROBES})"
+        try:
+            result_report = {
+                "domain": d,
+                "previous_route": None,
+                "new_route": None,
+                "probed": [],
+                "action": "none",
+            }
+
+            # Check safety budget
+            current_hourly_probes = self.db.get_hourly_probe_count()
+            if current_hourly_probes >= MAX_HOURLY_PROBES:
+                result_report["action"] = "rate_limited"
+                result_report["reason"] = f"Hourly probe budget exhausted ({current_hourly_probes}/{MAX_HOURLY_PROBES})"
+                return result_report
+
+            current_decision = self.resolve(d)
+            result_report["previous_route"] = current_decision.outbound_tag
+
+            # If it's a Level 3 protected RU service, never heal to VPN
+            if current_decision.level == 3:
+                result_report["action"] = "protected_direct_locked"
+                return result_report
+
+            # Candidate order: if current is NL -> try DE, then US. If DE -> try NL, then US.
+            pool_nodes = self.db.list_nodes()
+            nodes_by_tag = {n["outbound_tag"]: n for n in pool_nodes}
+
+            candidate_tags = [TAG_DE, TAG_NL, TAG_US]
+            if current_decision.outbound_tag in candidate_tags:
+                candidate_tags.remove(current_decision.outbound_tag)
+
+            # Probe max 2 candidate countries
+            successful_tag = None
+            for tag in candidate_tags[:MAX_CANDIDATE_TRIES]:
+                node = nodes_by_tag.get(tag)
+                if not node or not node.get("socks_port"):
+                    continue
+
+                socks_port = node["socks_port"]
+                ok, latency_ms, detail = await self.probe_socks_node(socks_port, d)
+                self.db.record_probe(d, tag, "ok" if ok else "failed", latency_ms, detail)
+                result_report["probed"].append({
+                    "outbound_tag": tag,
+                    "country_code": node["country_code"],
+                    "success": ok,
+                    "latency_ms": latency_ms,
+                    "detail": detail,
+                })
+                if ok:
+                    successful_tag = tag
+                    country_code = node["country_code"]
+                    break
+
+            if successful_tag and successful_tag != current_decision.outbound_tag:
+                self.db.upsert_route(
+                    domain=d,
+                    country_code=country_code,
+                    outbound_tag=successful_tag,
+                    confidence="verified",
+                    reason=f"Auto-healed: verified reachable via {country_code} ({latency_ms}ms)",
+                    ttl_seconds=TTL_VERIFIED_SECONDS,
+                )
+                self.synchronizer.sync()
+                result_report["action"] = "healed"
+                result_report["new_route"] = successful_tag
+            else:
+                result_report["action"] = "retained_or_no_alternative"
+
             return result_report
-
-        current_decision = self.resolve(d)
-        result_report["previous_route"] = current_decision.outbound_tag
-
-        # If it's a Level 3 protected RU service, never heal to VPN
-        if current_decision.level == 3:
-            result_report["action"] = "protected_direct_locked"
-            return result_report
-
-        # Candidate order: if current is NL -> try DE, then US. If DE -> try NL, then US.
-        pool_nodes = self.db.list_nodes()
-        nodes_by_tag = {n["outbound_tag"]: n for n in pool_nodes}
-
-        candidate_tags = [TAG_DE, TAG_NL, TAG_US]
-        if current_decision.outbound_tag in candidate_tags:
-            candidate_tags.remove(current_decision.outbound_tag)
-
-        # Probe max 2 candidate countries
-        successful_tag = None
-        for tag in candidate_tags[:MAX_CANDIDATE_TRIES]:
-            node = nodes_by_tag.get(tag)
-            if not node or not node.get("socks_port"):
-                continue
-
-            socks_port = node["socks_port"]
-            ok, latency_ms, detail = await self.probe_socks_node(socks_port, d)
-            self.db.record_probe(d, tag, "ok" if ok else "failed", latency_ms, detail)
-            result_report["probed"].append({
-                "outbound_tag": tag,
-                "country_code": node["country_code"],
-                "success": ok,
-                "latency_ms": latency_ms,
-                "detail": detail,
-            })
-            if ok:
-                successful_tag = tag
-                country_code = node["country_code"]
-                break
-
-        if successful_tag and successful_tag != current_decision.outbound_tag:
-            self.db.upsert_route(
-                domain=d,
-                country_code=country_code,
-                outbound_tag=successful_tag,
-                confidence="verified",
-                reason=f"Auto-healed: verified reachable via {country_code} ({latency_ms}ms)",
-                ttl_seconds=TTL_VERIFIED_SECONDS,
-            )
-            self.synchronizer.sync()
-            result_report["action"] = "healed"
-            result_report["new_route"] = successful_tag
-        else:
-            result_report["action"] = "retained_or_no_alternative"
-
-        return result_report
+        finally:
+            async with self._in_flight_lock:
+                self._in_flight_heals.discard(d)
 
     async def check_node_health(self, node: Dict[str, Any]) -> Tuple[bool, int]:
         """Check if a node in node_pool is alive and measure its roundtrip latency."""
@@ -752,6 +770,12 @@ class LogEventWatcher:
                 while not self._stop_event.is_set():
                     line = f.readline()
                     if not line:
+                        try:
+                            curr_size = os.path.getsize(self.log_path)
+                            if f.tell() > curr_size:
+                                f.seek(0, os.SEEK_SET)
+                        except OSError:
+                            pass
                         await asyncio.sleep(0.5)
                         continue
                     failed_domain = self.handle_line(line)
